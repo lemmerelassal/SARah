@@ -1,0 +1,223 @@
+// FEPForceCalculation.usf - GPU Compute Shader for FEP Force Calculation
+// Place this file in: YourProject/Shaders/Private/FEPForceCalculation.usf
+// Compatible with Unreal Engine 5.6
+
+#include "/Engine/Public/Platform.ush"
+
+#define THREAD_GROUP_SIZE 64
+
+// ============================================================================
+// INPUT BUFFERS (Read-Only)
+// ============================================================================
+
+Buffer<float4> Positions;              // (x, y, z, mass) for each atom
+Buffer<float> Charges;                 // Partial charges for electrostatics
+Buffer<float> VdWRadii;                // Van der Waals radii (sigma)
+Buffer<float> VdWEpsilons;             // Van der Waals well depth (epsilon)
+Buffer<uint> IsLigandAtom;             // 1 if ligand atom, 0 if protein
+
+// ============================================================================
+// OUTPUT BUFFER (Write)
+// ============================================================================
+
+RWBuffer<float4> Forces;               // (Fx, Fy, Fz, 0) output forces
+
+// ============================================================================
+// SIMULATION PARAMETERS
+// ============================================================================
+
+uint NumAtoms;                         // Total number of atoms
+float Lambda;                          // FEP coupling parameter (0 to 1)
+float CutoffDistance;                  // Interaction cutoff in Angstroms
+float CutoffDistanceSq;                // Cutoff squared (optimization)
+float DielectricConstant;              // For electrostatic scaling
+float CoulombConstant;                 // 332.0636 kcal*A/(mol*e^2)
+
+// ============================================================================
+// COMPUTE SHADER KERNEL
+// ============================================================================
+
+[numthreads(THREAD_GROUP_SIZE, 1, 1)]
+void MainCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+    // Each thread handles one atom
+    uint AtomIdx = ThreadId.x;
+    
+    // Bounds check
+    if (AtomIdx >= NumAtoms)
+        return;
+    
+    // Load this atom's properties
+    float3 Pos1 = Positions[AtomIdx].xyz;
+    float Charge1 = Charges[AtomIdx];
+    float Radius1 = VdWRadii[AtomIdx];
+    float Epsilon1 = VdWEpsilons[AtomIdx];
+    bool bIsLigand1 = (IsLigandAtom[AtomIdx] != 0);
+    
+    // Accumulate forces from all other atoms
+    float3 TotalForce = float3(0.0, 0.0, 0.0);
+    
+    // Loop over all other atoms
+    for (uint j = 0; j < NumAtoms; j++)
+    {
+        // Skip self-interaction
+        if (j == AtomIdx)
+            continue;
+        
+        // Calculate distance
+        float3 Pos2 = Positions[j].xyz;
+        float3 Delta = Pos2 - Pos1;
+        float rSq = dot(Delta, Delta);
+        
+        // Apply cutoff and minimum distance
+        if (rSq >= CutoffDistanceSq || rSq < 0.01)
+            continue;
+        
+        float r = sqrt(rSq);
+        float rInv = 1.0 / r;
+        
+        // Load other atom's properties
+        float Charge2 = Charges[j];
+        float Radius2 = VdWRadii[j];
+        float Epsilon2 = VdWEpsilons[j];
+        bool bIsLigand2 = (IsLigandAtom[j] != 0);
+        
+        // Scale factor for ligand interactions (FEP)
+        // If either atom is ligand, scale by Lambda
+        float ScaleFactor = (bIsLigand1 || bIsLigand2) ? Lambda : 1.0;
+        
+        // ===== ELECTROSTATIC FORCE =====
+        // Coulomb's law: F = k * q1 * q2 / r^2
+        // Force magnitude includes direction (1/r term)
+        float ForceMagElec = ScaleFactor * CoulombConstant * Charge1 * Charge2 * 
+                            rInv * rInv * rInv / DielectricConstant;
+        
+        // ===== VAN DER WAALS FORCE =====
+        // Lennard-Jones 12-6 potential
+        // Combining rules: sigma = (sigma1 + sigma2)/2, epsilon = sqrt(eps1 * eps2)
+        float Sigma = (Radius1 + Radius2) * 0.5;
+        float Epsilon = sqrt(Epsilon1 * Epsilon2);
+        
+        // Calculate (sigma/r)^6 and (sigma/r)^12
+        float SigmaOverR = Sigma * rInv;
+        float SR2 = SigmaOverR * SigmaOverR;
+        float SR6 = SR2 * SR2 * SR2;
+        float SR12 = SR6 * SR6;
+        
+        // Force: F = 24*epsilon * [2*(sigma/r)^12 - (sigma/r)^6] / r
+        float ForceMagVdW = ScaleFactor * 24.0 * Epsilon * (2.0 * SR12 - SR6) * rInv;
+        
+        // ===== COMBINE FORCES =====
+        float3 Direction = Delta * rInv;  // Unit vector from atom1 to atom2
+        float3 Force = Direction * (ForceMagElec + ForceMagVdW);
+        
+        // Newton's third law: force on atom1 is opposite to force on atom2
+        TotalForce -= Force;
+    }
+    
+    // Write final force for this atom
+    Forces[AtomIdx] = float4(TotalForce, 0.0);
+}
+
+// ============================================================================
+// ALTERNATIVE: SHARED MEMORY OPTIMIZATION (Advanced)
+// ============================================================================
+
+/*
+// This version uses shared memory for better performance with large systems
+// Processes atoms in tiles to maximize memory reuse
+
+#define TILE_SIZE 64
+
+groupshared float3 SharedPositions[TILE_SIZE];
+groupshared float SharedCharges[TILE_SIZE];
+groupshared float SharedRadii[TILE_SIZE];
+groupshared float SharedEpsilons[TILE_SIZE];
+groupshared uint SharedIsLigand[TILE_SIZE];
+
+[numthreads(TILE_SIZE, 1, 1)]
+void MainCS_Tiled(uint3 GroupId : SV_GroupID,
+                  uint3 GroupThreadId : SV_GroupThreadID,
+                  uint3 ThreadId : SV_DispatchThreadID)
+{
+    uint AtomIdx = ThreadId.x;
+    uint LocalIdx = GroupThreadId.x;
+    
+    if (AtomIdx >= NumAtoms)
+        return;
+    
+    // Load this atom's properties
+    float3 Pos1 = Positions[AtomIdx].xyz;
+    float Charge1 = Charges[AtomIdx];
+    float Radius1 = VdWRadii[AtomIdx];
+    float Epsilon1 = VdWEpsilons[AtomIdx];
+    bool bIsLigand1 = (IsLigandAtom[AtomIdx] != 0);
+    
+    float3 TotalForce = float3(0, 0, 0);
+    
+    // Process atoms in tiles
+    uint NumTiles = (NumAtoms + TILE_SIZE - 1) / TILE_SIZE;
+    
+    for (uint TileIdx = 0; TileIdx < NumTiles; TileIdx++)
+    {
+        uint j = TileIdx * TILE_SIZE + LocalIdx;
+        
+        // Load tile data into shared memory
+        if (j < NumAtoms)
+        {
+            SharedPositions[LocalIdx] = Positions[j].xyz;
+            SharedCharges[LocalIdx] = Charges[j];
+            SharedRadii[LocalIdx] = VdWRadii[j];
+            SharedEpsilons[LocalIdx] = VdWEpsilons[j];
+            SharedIsLigand[LocalIdx] = IsLigandAtom[j];
+        }
+        
+        GroupMemoryBarrierWithGroupSync();
+        
+        // Calculate forces from all atoms in this tile
+        for (uint k = 0; k < TILE_SIZE; k++)
+        {
+            uint OtherIdx = TileIdx * TILE_SIZE + k;
+            
+            if (OtherIdx >= NumAtoms || OtherIdx == AtomIdx)
+                continue;
+            
+            float3 Pos2 = SharedPositions[k];
+            float3 Delta = Pos2 - Pos1;
+            float rSq = dot(Delta, Delta);
+            
+            if (rSq >= CutoffDistanceSq || rSq < 0.01)
+                continue;
+            
+            float r = sqrt(rSq);
+            float rInv = 1.0 / r;
+            
+            float Charge2 = SharedCharges[k];
+            float Radius2 = SharedRadii[k];
+            float Epsilon2 = SharedEpsilons[k];
+            bool bIsLigand2 = (SharedIsLigand[k] != 0);
+            
+            float ScaleFactor = (bIsLigand1 || bIsLigand2) ? Lambda : 1.0;
+            
+            // Electrostatics
+            float ForceMagElec = ScaleFactor * CoulombConstant * Charge1 * Charge2 * 
+                                rInv * rInv * rInv / DielectricConstant;
+            
+            // Van der Waals
+            float Sigma = (Radius1 + Radius2) * 0.5;
+            float Epsilon = sqrt(Epsilon1 * Epsilon2);
+            float SigmaOverR = Sigma * rInv;
+            float SR6 = pow(SigmaOverR, 6.0);
+            float SR12 = SR6 * SR6;
+            float ForceMagVdW = ScaleFactor * 24.0 * Epsilon * (2.0 * SR12 - SR6) * rInv;
+            
+            float3 Direction = Delta * rInv;
+            TotalForce -= Direction * (ForceMagElec + ForceMagVdW);
+        }
+        
+        GroupMemoryBarrierWithGroupSync();
+    }
+    
+    Forces[AtomIdx] = float4(TotalForce, 0);
+}
+*/

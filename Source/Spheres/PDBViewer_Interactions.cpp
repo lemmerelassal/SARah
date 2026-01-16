@@ -246,6 +246,50 @@ void APDBViewer::DetectPiStacking(bool bProteinProtein, bool bProteinLigand)
     UE_LOG(LogTemp, Log, TEXT("Detecting pi-stacking interactions..."));
     int32 InitialCount = DetectedInteractions.Num();
     
+    // Lambda to check pi-stacking between two aromatic systems
+    auto CheckPiStacking = [this](
+        const FVector& Center1, const FVector& Normal1, const FString& Key1,
+        const FVector& Center2, const FVector& Normal2, const FString& Key2,
+        bool bIsProteinLigand)
+    {
+        float Distance = FVector::Dist(Center1, Center2);
+        
+        if (Distance <= PiStackingMaxDistance)
+        {
+            // Calculate angle between ring normals
+            float CosAngle = FMath::Abs(FVector::DotProduct(Normal1, Normal2));
+            float Angle = FMath::Acos(FMath::Clamp(CosAngle, 0.0f, 1.0f)) * 180.0f / PI;
+            
+            // Face-to-face stacking: normals are parallel (angle ~0° or ~180°)
+            // T-shaped stacking: normals are perpendicular (angle ~90°)
+            bool bIsFaceToFace = (Angle < 30.0f || Angle > 150.0f);
+            bool bIsTShaped = (Angle > 60.0f && Angle < 120.0f);
+            
+            if (bIsFaceToFace || bIsTShaped)
+            {
+                FMolecularInteraction Interaction;
+                Interaction.Type = EInteractionType::PiStacking;
+                Interaction.Residue1 = Key1;
+                Interaction.Residue2 = Key2;
+                Interaction.Atom1 = TEXT("RING");
+                Interaction.Atom2 = TEXT("RING");
+                Interaction.Position1 = Center1;
+                Interaction.Position2 = Center2;
+                Interaction.Distance = Distance;
+                Interaction.Angle = Angle;
+                Interaction.Energy = -2.0f - (PiStackingMaxDistance - Distance) * 3.0f;
+                Interaction.bIsProteinLigand = bIsProteinLigand;
+                
+                DetectedInteractions.Add(Interaction);
+                
+                UE_LOG(LogTemp, Log, TEXT("Pi-Stacking (%s): %s <-> %s | Dist: %.2f A | Angle: %.1f° | Type: %s"),
+                       bIsProteinLigand ? TEXT("Prot-Lig") : TEXT("Prot-Prot"),
+                       *Key1, *Key2, Distance, Angle,
+                       bIsTShaped ? TEXT("T-shaped") : TEXT("Face-to-face"));
+            }
+        }
+    };
+    
     // Protein-Protein pi-stacking
     if (bProteinProtein)
     {
@@ -268,24 +312,35 @@ void APDBViewer::DetectPiStacking(bool bProteinProtein, bool bProteinLigand)
                 FVector Center2, Normal2;
                 if (!GetAromaticRingCenter(Res2, Center2, Normal2)) continue;
                 
-                float Distance = FVector::Dist(Center1, Center2);
+                CheckPiStacking(Center1, Normal1, ResKeys[i], Center2, Normal2, ResKeys[j], false);
+            }
+        }
+    }
+    
+    // Protein-Ligand pi-stacking
+    if (bProteinLigand)
+    {
+        TArray<FString> ResKeys, LigKeys;
+        ResidueMap.GetKeys(ResKeys);
+        LigandMap.GetKeys(LigKeys);
+        
+        for (const FString& ResKey : ResKeys)
+        {
+            FResidueInfo* Res = ResidueMap[ResKey];
+            if (!Res || !Res->bIsVisible || !IsAromatic(Res->ResidueName)) continue;
+            
+            FVector ResCenter, ResNormal;
+            if (!GetAromaticRingCenter(Res, ResCenter, ResNormal)) continue;
+            
+            for (const FString& LigKey : LigKeys)
+            {
+                FLigandInfo* Lig = LigandMap[LigKey];
+                if (!Lig || !Lig->bIsVisible) continue;
                 
-                if (Distance <= PiStackingMaxDistance)
-                {
-                    FMolecularInteraction Interaction;
-                    Interaction.Type = EInteractionType::PiStacking;
-                    Interaction.Residue1 = ResKeys[i];
-                    Interaction.Residue2 = ResKeys[j];
-                    Interaction.Atom1 = TEXT("RING");
-                    Interaction.Atom2 = TEXT("RING");
-                    Interaction.Position1 = Center1;
-                    Interaction.Position2 = Center2;
-                    Interaction.Distance = Distance;
-                    Interaction.Energy = -2.0f - (PiStackingMaxDistance - Distance) * 3.0f;
-                    Interaction.bIsProteinLigand = false;
-                    
-                    DetectedInteractions.Add(Interaction);
-                }
+                FVector LigCenter, LigNormal;
+                if (!GetAromaticRingCenter(Lig, LigCenter, LigNormal)) continue;
+                
+                CheckPiStacking(ResCenter, ResNormal, ResKey, LigCenter, LigNormal, LigKey, true);
             }
         }
     }
