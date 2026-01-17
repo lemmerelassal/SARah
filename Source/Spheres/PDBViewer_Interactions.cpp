@@ -39,6 +39,10 @@ void APDBViewer::CalculateAllInteractions(bool bProteinProtein, bool bProteinLig
     }
     
     UE_LOG(LogTemp, Log, TEXT("Total interactions detected: %d"), DetectedInteractions.Num());
+    
+    // Analyze H-bond networks
+    AnalyzeHBondNetworks();
+    
     DebugPrintInteractions();
     
     // Initialize visibility for all interaction types
@@ -71,16 +75,36 @@ void APDBViewer::DetectHydrogenBonds(bool bProteinProtein, bool bProteinLigand)
         for (int32 i = 0; i < Positions1.Num(); ++i)
         {
             // Check if donor (with hydrogen)
-            if (!IsHBondDonor(Elements1[i], AtomNames1[i]))
+            bool bIsDonor = IsHBondDonor(Elements1[i], AtomNames1[i]);
+            
+            // DEBUG: Log donor checks for ligands
+            if (bIsProteinLigand && Elements1[i] == TEXT("N"))
+            {
+                UE_LOG(LogTemp, Log, TEXT("  Checking donor: %s atom %s (element %s) -> IsDonor: %s"),
+                       *Key1, *AtomNames1[i], *Elements1[i], bIsDonor ? TEXT("YES") : TEXT("NO"));
+            }
+            
+            if (!bIsDonor)
                 continue;
             
             for (int32 j = 0; j < Positions2.Num(); ++j)
             {
                 // Check if acceptor
-                if (!IsHBondAcceptor(Elements2[j], AtomNames2[j]))
+                bool bIsAcceptor = IsHBondAcceptor(Elements2[j], AtomNames2[j]);
+                
+                if (!bIsAcceptor)
                     continue;
                 
                 float Distance = FVector::Dist(Positions1[i], Positions2[j]);
+                
+                // DEBUG: Log close pairs
+                if (bIsProteinLigand && Distance <= HBondMaxDistance + 1.0f)
+                {
+                    UE_LOG(LogTemp, Log, TEXT("  Potential H-bond: %s:%s (%s) -> %s:%s (%s) | Dist: %.2f | Max: %.2f"),
+                           *Key1, *AtomNames1[i], *Elements1[i],
+                           *Key2, *AtomNames2[j], *Elements2[j],
+                           Distance, HBondMaxDistance);
+                }
                 
                 if (Distance <= HBondMaxDistance)
                 {
@@ -101,6 +125,9 @@ void APDBViewer::DetectHydrogenBonds(bool bProteinProtein, bool bProteinLigand)
                     Interaction.bIsProteinLigand = bIsProteinLigand;
                     
                     DetectedInteractions.Add(Interaction);
+                    
+                    UE_LOG(LogTemp, Warning, TEXT("  *** H-BOND DETECTED: %s:%s -> %s:%s | %.2f A ***"),
+                           *Key1, *AtomNames1[i], *Key2, *AtomNames2[j], Distance);
                 }
             }
         }
@@ -141,23 +168,37 @@ void APDBViewer::DetectHydrogenBonds(bool bProteinProtein, bool bProteinLigand)
         ResidueMap.GetKeys(ResKeys);
         LigandMap.GetKeys(LigKeys);
         
-        for (const FString& ResKey : ResKeys)
+        UE_LOG(LogTemp, Warning, TEXT("=== Checking Protein-Ligand H-bonds ==="));
+        UE_LOG(LogTemp, Warning, TEXT("Protein residues: %d, Ligands: %d"), ResKeys.Num(), LigKeys.Num());
+        
+        for (const FString& LigKey : LigKeys)
         {
-            FResidueInfo* Res = ResidueMap[ResKey];
-            if (!Res || !Res->bIsVisible) continue;
+            FLigandInfo* Lig = LigandMap[LigKey];
+            if (!Lig || !Lig->bIsVisible) continue;
             
-            for (const FString& LigKey : LigKeys)
+            UE_LOG(LogTemp, Warning, TEXT("Ligand %s: %d atoms"), *LigKey, Lig->AtomNames.Num());
+            
+            // Log all ligand atoms
+            for (int32 i = 0; i < Lig->AtomNames.Num(); ++i)
             {
-                FLigandInfo* Lig = LigandMap[LigKey];
-                if (!Lig || !Lig->bIsVisible) continue;
+                UE_LOG(LogTemp, Log, TEXT("  Ligand atom %d: Name='%s' Element='%s'"),
+                       i, *Lig->AtomNames[i], *Lig->AtomElements[i]);
+            }
+            
+            for (const FString& ResKey : ResKeys)
+            {
+                FResidueInfo* Res = ResidueMap[ResKey];
+                if (!Res || !Res->bIsVisible) continue;
                 
                 // Check both directions (protein donor, ligand acceptor AND vice versa)
+                UE_LOG(LogTemp, Log, TEXT("Checking: Residue %s as donor -> Ligand %s as acceptor"), *ResKey, *LigKey);
                 CheckHBonds(
                     Res->AtomPositions, Res->AtomElements, Res->AtomNames, ResKey,
                     Lig->AtomPositions, Lig->AtomElements, Lig->AtomNames, LigKey,
                     true
                 );
                 
+                UE_LOG(LogTemp, Log, TEXT("Checking: Ligand %s as donor -> Residue %s as acceptor"), *LigKey, *ResKey);
                 CheckHBonds(
                     Lig->AtomPositions, Lig->AtomElements, Lig->AtomNames, LigKey,
                     Res->AtomPositions, Res->AtomElements, Res->AtomNames, ResKey,
@@ -405,35 +446,151 @@ void APDBViewer::DetectHydrophobicInteractions(bool bProteinProtein, bool bProte
 
 bool APDBViewer::IsHBondDonor(const FString& Element, const FString& AtomName) const
 {
-    // Nitrogen and Oxygen with hydrogens can be donors
-    if (Element == TEXT("N") || Element == TEXT("O"))
-        return true;
+    // H-bond donors must have hydrogen atoms attached
+    // This is a simplified check - ideally you'd verify actual H atoms in the structure
     
-    // Also check for specific backbone atoms
-    if (AtomName == TEXT("N") || AtomName == TEXT("NH1") || AtomName == TEXT("NH2") ||
-        AtomName == TEXT("NE") || AtomName == TEXT("NE1") || AtomName == TEXT("NE2") ||
-        AtomName == TEXT("ND1") || AtomName == TEXT("ND2") || AtomName == TEXT("NZ"))
-        return true;
+    // Nitrogen donors (with H attached)
+    if (Element == TEXT("N"))
+    {
+        // Backbone amide nitrogen (always has H)
+        if (AtomName == TEXT("N"))
+            return true;
+        
+        // Side chain nitrogens with H
+        // Lysine NZ (NH3+)
+        if (AtomName == TEXT("NZ"))
+            return true;
+        
+        // Arginine NH1, NH2, NE
+        if (AtomName == TEXT("NH1") || AtomName == TEXT("NH2") || AtomName == TEXT("NE"))
+            return true;
+        
+        // Tryptophan NE1 (indole NH)
+        if (AtomName == TEXT("NE1"))
+            return true;
+        
+        // Histidine ND1, NE2 (can be protonated)
+        if (AtomName == TEXT("ND1") || AtomName == TEXT("NE2"))
+            return true;
+        
+        // Glutamine, Asparagine ND2, NE2
+        if (AtomName == TEXT("NE2") || AtomName == TEXT("ND2"))
+            return true;
+        
+        // LIGAND ATOMS: Check for common ligand nitrogen patterns
+        // Primary amines: NH2, N1H2, etc.
+        if (AtomName.Contains(TEXT("NH2")) || AtomName == TEXT("NH2"))
+            return true;
+        
+        // Secondary amines: NH, N1H, etc.
+        if (AtomName == TEXT("NH") || AtomName.EndsWith(TEXT("NH")))
+            return true;
+        
+        // Numbered amines: N1, N2, N3 with implicit hydrogens
+        // For safety, assume any N in a ligand could be a donor
+        // (This is more permissive but catches ligand cases)
+        if (AtomName.StartsWith(TEXT("N")) && AtomName.Len() <= 3)
+            return true;
+    }
     
-    if (AtomName == TEXT("OH") || AtomName == TEXT("OG") || AtomName == TEXT("OG1"))
-        return true;
+    // Oxygen donors (with H attached) - mainly hydroxyl groups
+    if (Element == TEXT("O"))
+    {
+        // Serine OG, Threonine OG1 (hydroxyl)
+        if (AtomName == TEXT("OG") || AtomName == TEXT("OG1"))
+            return true;
+        
+        // Tyrosine OH (phenolic hydroxyl)
+        if (AtomName == TEXT("OH"))
+            return true;
+        
+        // LIGAND ATOMS: Hydroxyl oxygens
+        // Common patterns: OH, O1H, etc.
+        if (AtomName.Contains(TEXT("OH")) || AtomName.EndsWith(TEXT("H")))
+            return true;
+        
+        // Don't include backbone carbonyl O - it's an acceptor, not donor
+    }
+    
+    // Sulfur donors (rare, but cysteine SH can weakly donate)
+    if (Element == TEXT("S"))
+    {
+        if (AtomName == TEXT("SG"))
+            return true;
+        
+        // LIGAND ATOMS: Thiol groups SH
+        if (AtomName.Contains(TEXT("SH")) || AtomName.EndsWith(TEXT("H")))
+            return true;
+    }
     
     return false;
 }
 
 bool APDBViewer::IsHBondAcceptor(const FString& Element, const FString& AtomName) const
 {
-    // Oxygen, Nitrogen, and sometimes Sulfur can be acceptors
-    if (Element == TEXT("O") || Element == TEXT("N") || Element == TEXT("S"))
-        return true;
+    // H-bond acceptors have lone pairs to accept hydrogen bonds
     
-    // Backbone carbonyl oxygen
-    if (AtomName == TEXT("O") || AtomName == TEXT("OXT"))
+    // Oxygen acceptors
+    if (Element == TEXT("O"))
+    {
+        // Backbone carbonyl oxygen (strong acceptor)
+        if (AtomName == TEXT("O") || AtomName == TEXT("OXT"))
+            return true;
+        
+        // Side chain carbonyls
+        // Aspartate, Glutamate OD1, OD2, OE1, OE2
+        if (AtomName == TEXT("OD1") || AtomName == TEXT("OD2") || 
+            AtomName == TEXT("OE1") || AtomName == TEXT("OE2"))
+            return true;
+        
+        // Asparagine, Glutamine OD1, OE1
+        if (AtomName == TEXT("OD1") || AtomName == TEXT("OE1"))
+            return true;
+        
+        // Serine OG, Threonine OG1 (can also accept)
+        if (AtomName == TEXT("OG") || AtomName == TEXT("OG1"))
+            return true;
+        
+        // Tyrosine OH (can accept and donate)
+        if (AtomName == TEXT("OH"))
+            return true;
+        
+        // LIGAND ATOMS: All oxygens can potentially accept
+        // Carbonyl, ether, hydroxyl, etc.
         return true;
+    }
     
-    // Side chain oxygens
-    if (AtomName.StartsWith(TEXT("O")))
+    // Nitrogen acceptors (with lone pairs)
+    if (Element == TEXT("N"))
+    {
+        // Histidine ND1, NE2 (when not protonated, can accept)
+        if (AtomName == TEXT("ND1") || AtomName == TEXT("NE2"))
+            return true;
+        
+        // LIGAND ATOMS: Aromatic/sp2 nitrogens, tertiary amines
+        // More permissive for ligands - most N can accept
+        if (AtomName.StartsWith(TEXT("N")))
+            return true;
+    }
+    
+    // Sulfur acceptors (weak)
+    if (Element == TEXT("S"))
+    {
+        // Methionine SD, Cysteine SG can weakly accept
         return true;
+    }
+    
+    // Fluorine acceptors (moderate strength)
+    if (Element == TEXT("F"))
+    {
+        return true;
+    }
+    
+    // Chlorine acceptors (weak)
+    if (Element == TEXT("Cl") || Element == TEXT("CL"))
+    {
+        return true;
+    }
     
     return false;
 }
@@ -689,6 +846,16 @@ void APDBViewer::DrawInteraction(const FMolecularInteraction& Interaction)
     int32 NumSpheres = 5;
     float SegmentLength = Length / (NumSpheres * 2 - 1);
     
+    // Determine sphere size and brightness based on network membership
+    float SphereScale = 0.15f;
+    float BrightnessMult = 1.0f;
+    
+    if (Interaction.Type == EInteractionType::HydrogenBond && Interaction.bIsPartOfNetwork)
+    {
+        SphereScale = 0.25f; // Larger spheres for network H-bonds
+        BrightnessMult = 1.5f; // Brighter for network H-bonds
+    }
+    
     for (int32 i = 0; i < NumSpheres; ++i)
     {
         // Calculate sphere position along the interaction line
@@ -702,11 +869,20 @@ void APDBViewer::DrawInteraction(const FMolecularInteraction& Interaction)
         
         // Position and scale the sphere
         Sphere->SetWorldLocation(SpherePos);
-        Sphere->SetWorldScale3D(FVector(0.15f)); // Small sphere size
+        Sphere->SetWorldScale3D(FVector(SphereScale));
         
         // Create material and set color
         UMaterialInstanceDynamic* Mat = UMaterialInstanceDynamic::Create(SphereMaterialAsset, Sphere);
         FLinearColor Color = GetInteractionColor(Interaction.Type);
+        
+        // Brighten color for network H-bonds
+        if (BrightnessMult > 1.0f)
+        {
+            Color.R = FMath::Min(Color.R * BrightnessMult, 1.0f);
+            Color.G = FMath::Min(Color.G * BrightnessMult, 1.0f);
+            Color.B = FMath::Min(Color.B * BrightnessMult, 1.0f);
+        }
+        
         Mat->SetVectorParameterValue(TEXT("Color"), Color);
         Sphere->SetMaterial(0, Mat);
         
@@ -803,6 +979,117 @@ TArray<FMolecularInteraction> APDBViewer::GetInteractionsForResidue(const FStrin
             Result.Add(Interaction);
     }
     return Result;
+}
+
+void APDBViewer::AnalyzeHBondNetworks()
+{
+    UE_LOG(LogTemp, Log, TEXT("=== Analyzing H-Bond Networks ==="));
+    
+    // Build adjacency list of residues connected by H-bonds
+    TMap<FString, TArray<FString>> HBondGraph;
+    TMap<FString, TArray<FMolecularInteraction*>> HBondConnections;
+    
+    for (FMolecularInteraction& Interaction : DetectedInteractions)
+    {
+        if (Interaction.Type == EInteractionType::HydrogenBond)
+        {
+            // Add edges in both directions
+            HBondGraph.FindOrAdd(Interaction.Residue1).Add(Interaction.Residue2);
+            HBondGraph.FindOrAdd(Interaction.Residue2).Add(Interaction.Residue1);
+            
+            HBondConnections.FindOrAdd(Interaction.Residue1).Add(&Interaction);
+            HBondConnections.FindOrAdd(Interaction.Residue2).Add(&Interaction);
+        }
+    }
+    
+    // Find networks (connected components with 3+ residues)
+    TSet<FString> Visited;
+    TArray<TArray<FString>> Networks;
+    
+    for (const auto& Pair : HBondGraph)
+    {
+        if (Visited.Contains(Pair.Key))
+            continue;
+        
+        // BFS to find connected component
+        TArray<FString> Network;
+        TArray<FString> Queue;
+        Queue.Add(Pair.Key);
+        Visited.Add(Pair.Key);
+        
+        while (Queue.Num() > 0)
+        {
+            FString Current = Queue[0];
+            Queue.RemoveAt(0);
+            Network.Add(Current);
+            
+            if (HBondGraph.Contains(Current))
+            {
+                for (const FString& Neighbor : HBondGraph[Current])
+                {
+                    if (!Visited.Contains(Neighbor))
+                    {
+                        Visited.Add(Neighbor);
+                        Queue.Add(Neighbor);
+                    }
+                }
+            }
+        }
+        
+        // Only consider networks with 3+ residues
+        if (Network.Num() >= 3)
+        {
+            Networks.Add(Network);
+        }
+    }
+    
+    // Log network information
+    UE_LOG(LogTemp, Log, TEXT("Found %d H-bond networks (3+ residues):"), Networks.Num());
+    
+    for (int32 i = 0; i < Networks.Num(); ++i)
+    {
+        const TArray<FString>& Network = Networks[i];
+        UE_LOG(LogTemp, Log, TEXT("Network %d: %d residues"), i + 1, Network.Num());
+        
+        // Count H-bonds in this network
+        int32 HBondCount = 0;
+        TSet<FMolecularInteraction*> NetworkBonds;
+        
+        for (const FString& Residue : Network)
+        {
+            if (HBondConnections.Contains(Residue))
+            {
+                for (FMolecularInteraction* Bond : HBondConnections[Residue])
+                {
+                    if (Network.Contains(Bond->Residue1) && Network.Contains(Bond->Residue2))
+                    {
+                        NetworkBonds.Add(Bond);
+                    }
+                }
+            }
+        }
+        
+        UE_LOG(LogTemp, Log, TEXT("  %d H-bonds connecting:"), NetworkBonds.Num());
+        
+        // Print residues in network
+        FString ResidueList;
+        for (int32 j = 0; j < Network.Num(); ++j)
+        {
+            ResidueList += Network[j];
+            if (j < Network.Num() - 1)
+                ResidueList += TEXT(", ");
+        }
+        UE_LOG(LogTemp, Log, TEXT("  %s"), *ResidueList);
+        
+        // Mark these interactions as part of a network
+        for (FMolecularInteraction* Bond : NetworkBonds)
+        {
+            Bond->bIsPartOfNetwork = true;
+            Bond->NetworkID = i;
+        }
+    }
+    
+    UE_LOG(LogTemp, Log, TEXT("==========================="));
 }
 
 void APDBViewer::DebugPrintInteractions()

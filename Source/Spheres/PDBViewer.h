@@ -19,6 +19,20 @@ enum class EInteractionType : uint8
     Cation_Pi UMETA(DisplayName = "Cation-Pi")
 };
 
+// NEW: Tree node type enumeration for hierarchical structure
+UENUM(BlueprintType)
+enum class EPDBNodeType : uint8
+{
+    Chain UMETA(DisplayName = "Chain"),
+    ResiduesCategory UMETA(DisplayName = "Residues Category"),
+    HeteroatomsCategory UMETA(DisplayName = "Heteroatoms Category"),
+    WaterCategory UMETA(DisplayName = "Water Category"),
+    LigandsCategory UMETA(DisplayName = "Ligands Category"),
+    Residue UMETA(DisplayName = "Residue"),
+    Water UMETA(DisplayName = "Water"),
+    Ligand UMETA(DisplayName = "Ligand")
+};
+
 // Structure to store molecular interactions
 USTRUCT(BlueprintType)
 struct FMolecularInteraction
@@ -57,6 +71,16 @@ struct FMolecularInteraction
     
     UPROPERTY(BlueprintReadOnly)
     bool bIsProteinLigand; // True if interaction is between protein and ligand
+
+
+        // Network analysis fields
+    UPROPERTY(BlueprintReadWrite, Category = "Interaction")
+    bool bIsPartOfNetwork = false;
+    
+    UPROPERTY(BlueprintReadWrite, Category = "Interaction")
+    int32 NetworkID = -1;
+
+    
     
     FMolecularInteraction()
         : Type(EInteractionType::VanDerWaals)
@@ -118,6 +142,9 @@ struct FLigandInfo
     // NEW: Light components for each atom
     TArray<UPointLightComponent*> AtomLights;
     
+    // NEW: Flag to distinguish water from ligands
+    bool bIsWater = false;
+    
     // OPTIMIZED: Cached data
     FVector CachedCenterOfMass;
     bool bCenterOfMassCached = false;
@@ -135,12 +162,18 @@ class SPHERES_API UPDBTreeNode : public UObject
 public:
     TMap<FString, FLigandInfo*> LigandMap;
     TMap<FString, FResidueInfo*> ResidueMap;
+    
     UPROPERTY(BlueprintReadOnly, Category = "PDB Viewer")
     FString DisplayName;
     
     UPROPERTY(BlueprintReadOnly, Category = "PDB Viewer")
     FString NodeKey;
     
+    // NEW: Node type for hierarchical tree
+    UPROPERTY(BlueprintReadOnly, Category = "PDB Viewer")
+    EPDBNodeType NodeType = EPDBNodeType::Residue;
+    
+    // Kept for backward compatibility
     UPROPERTY(BlueprintReadOnly, Category = "PDB Viewer")
     bool bIsChain = false;
     
@@ -150,6 +183,10 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "PDB Viewer")
     FString ChainID;
     
+    // NEW: Helper to check if node can have children
+    UPROPERTY(BlueprintReadOnly, Category = "PDB Viewer")
+    bool bCanExpand = false;
+    
     void Initialize(const FString& InDisplayName, const FString& InNodeKey, bool bInIsChain, const FString& InChainID = TEXT(""))
     {
         DisplayName = InDisplayName;
@@ -157,6 +194,31 @@ public:
         bIsChain = bInIsChain;
         bIsVisible = true;
         ChainID = InChainID;
+        
+        // Set node type based on legacy flag
+        if (bInIsChain)
+        {
+            NodeType = EPDBNodeType::Chain;
+            bCanExpand = true;
+        }
+    }
+    
+    // NEW: Extended initializer with node type
+    void InitializeWithType(const FString& InDisplayName, const FString& InNodeKey, EPDBNodeType InNodeType, const FString& InChainID = TEXT(""))
+    {
+        DisplayName = InDisplayName;
+        NodeKey = InNodeKey;
+        NodeType = InNodeType;
+        ChainID = InChainID;
+        bIsVisible = true;
+        
+        // Set legacy flag and expansion capability
+        bIsChain = (InNodeType == EPDBNodeType::Chain);
+        bCanExpand = (InNodeType == EPDBNodeType::Chain ||
+                      InNodeType == EPDBNodeType::ResiduesCategory ||
+                      InNodeType == EPDBNodeType::HeteroatomsCategory ||
+                      InNodeType == EPDBNodeType::WaterCategory ||
+                      InNodeType == EPDBNodeType::LigandsCategory);
     }
 };
 
@@ -217,6 +279,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void ToggleChainVisibility(const FString& ChainID);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void PopulateTreeView(class UTreeView* TreeView);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") TArray<UObject*> GetChildrenForNode(UPDBTreeNode* Node);
+    
+    // Internal callback for TreeView - UE 5.6 compatible signature with reference parameter
+    void GetChildrenForNodeInternal(UObject* Item, TArray<UObject*>& OutChildren);
+    
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") TArray<UPDBTreeNode*> GetChainNodes();
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") TArray<UPDBTreeNode*> GetResidueNodesForChain(const FString& ChainID);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void ToggleNodeVisibility(UPDBTreeNode* Node);
@@ -227,6 +293,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void PopulateMoleculeListView(class UListView* ListView);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void ToggleMoleculeVisibility(const FString& MoleculeKey);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void ToggleMoleculeNodeVisibility(UPDBMoleculeNode* Node);
+    
+    // NEW: Get water nodes for a chain
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer") TArray<UPDBTreeNode*> GetWaterNodesForChain(const FString& ChainID);
+    
+    // NEW: Get ligand nodes for a chain
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer") TArray<UPDBTreeNode*> GetLigandNodesForChain(const FString& ChainID);
+    
+    // NEW: Toggle visibility for category nodes
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void ToggleCategoryVisibility(UPDBTreeNode* Node);
+    
+    // Helper to check if a ligand key represents water
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer") bool IsWaterKey(const FString& LigandKey) const;
     
     // Hydrogen generation functions
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer")
@@ -360,6 +438,9 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer")
     bool bAutoGenerateHydrogens = true;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Interactions")
+    bool bAutoCalculateInteractions = false;
+
     UPROPERTY() TArray<UStaticMeshComponent*> OverlapMarkers;
 
     virtual void BeginPlay() override;
@@ -374,6 +455,10 @@ protected:
 
     TSet<FString> ChainIDs; // Track all chains in the structure
     bool bHydrogensVisible = true;
+    
+    // Cache for tree nodes - prevents recreating objects on every GetChildren call
+    UPROPERTY()
+    TMap<FString, UPDBTreeNode*> TreeNodeCache;
     
     // ===== NEW: INTERACTION DATA =====
     UPROPERTY()
@@ -439,6 +524,9 @@ protected:
     
     // Detect hydrophobic interactions
     void DetectHydrophobicInteractions(bool bProteinProtein, bool bProteinLigand);
+
+
+    void AnalyzeHBondNetworks();
     
     // Helper: Check if atom can be H-bond donor
     bool IsHBondDonor(const FString& Element, const FString& AtomName) const;

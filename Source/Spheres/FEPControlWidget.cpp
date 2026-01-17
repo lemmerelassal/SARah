@@ -3,6 +3,7 @@
 
 #include "FEPControlWidget.h"
 #include "FEPCalculator.h"
+#include "FEPCalculatorOptimized.h"
 #include "PDBViewer.h"
 #include "Components/Button.h"
 #include "Components/TextBlock.h"
@@ -86,13 +87,27 @@ void UFEPControlWidget::NativeConstruct()
     // Auto-find FEPCalculator and PDBViewer if not set
     if (!FEPCalculator)
     {
+        // Try to find optimized calculator first
         AFEPCalculator* FoundCalc = Cast<AFEPCalculator>(
-            UGameplayStatics::GetActorOfClass(GetWorld(), AFEPCalculator::StaticClass())
+            UGameplayStatics::GetActorOfClass(GetWorld(), AFEPCalculatorOptimized::StaticClass())
         );
+        
+        // If not found, try base calculator
+        if (!FoundCalc)
+        {
+            FoundCalc = Cast<AFEPCalculator>(
+                UGameplayStatics::GetActorOfClass(GetWorld(), AFEPCalculator::StaticClass())
+            );
+        }
+        
         if (FoundCalc)
         {
             SetFEPCalculator(FoundCalc);
             UE_LOG(LogTemp, Log, TEXT("FEPControlWidget: Auto-found FEPCalculator"));
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("FEPControlWidget: Could not find FEPCalculator in level"));
         }
     }
     
@@ -106,6 +121,18 @@ void UFEPControlWidget::NativeConstruct()
             SetPDBViewer(FoundViewer);
             UE_LOG(LogTemp, Log, TEXT("FEPControlWidget: Auto-found PDBViewer"));
         }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("FEPControlWidget: Could not find PDBViewer in level"));
+        }
+    }
+    
+    // Final check and warning
+    if (!FEPCalculator || !PDBViewer)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FEPControlWidget: Calculator or Viewer not set!"));
+        UE_LOG(LogTemp, Error, TEXT("  - FEPCalculator found: %s"), FEPCalculator ? TEXT("YES") : TEXT("NO"));
+        UE_LOG(LogTemp, Error, TEXT("  - PDBViewer found: %s"), PDBViewer ? TEXT("YES") : TEXT("NO"));
     }
 }
 
@@ -208,9 +235,15 @@ FFEPParameters UFEPControlWidget::GetParametersFromUI()
 
 void UFEPControlWidget::OnStartButtonClicked()
 {
+    // Ensure actors are found
+    EnsureActorsFound();
+    
     if (!FEPCalculator || !PDBViewer)
     {
         UE_LOG(LogTemp, Error, TEXT("FEPControlWidget: Calculator or Viewer not set"));
+        UE_LOG(LogTemp, Error, TEXT("  Make sure both FEPCalculatorOptimized and PDBViewer are in your level!"));
+        UE_LOG(LogTemp, Error, TEXT("  FEPCalculator: %s"), FEPCalculator ? TEXT("Found") : TEXT("NOT FOUND"));
+        UE_LOG(LogTemp, Error, TEXT("  PDBViewer: %s"), PDBViewer ? TEXT("Found") : TEXT("NOT FOUND"));
         return;
     }
     
@@ -260,9 +293,13 @@ void UFEPControlWidget::OnExportButtonClicked()
 
 void UFEPControlWidget::OnCalculateVisibleButtonClicked()
 {
+    // Ensure actors are found
+    EnsureActorsFound();
+    
     if (!FEPCalculator || !PDBViewer)
     {
         UE_LOG(LogTemp, Error, TEXT("FEPControlWidget: Calculator or Viewer not set"));
+        UE_LOG(LogTemp, Error, TEXT("  Make sure both FEPCalculatorOptimized and PDBViewer are in your level!"));
         return;
     }
     
@@ -280,9 +317,13 @@ void UFEPControlWidget::OnCalculateVisibleButtonClicked()
 
 void UFEPControlWidget::OnCalculateAllButtonClicked()
 {
+    // Ensure actors are found
+    EnsureActorsFound();
+    
     if (!FEPCalculator || !PDBViewer)
     {
         UE_LOG(LogTemp, Error, TEXT("FEPControlWidget: Calculator or Viewer not set"));
+        UE_LOG(LogTemp, Error, TEXT("  Make sure both FEPCalculatorOptimized and PDBViewer are in your level!"));
         return;
     }
     
@@ -296,6 +337,41 @@ void UFEPControlWidget::OnCalculateAllButtonClicked()
     
     // Update UI state
     UpdateUIState(true);
+}
+
+void UFEPControlWidget::EnsureActorsFound()
+{
+    // Try to find FEPCalculator if not set
+    if (!FEPCalculator)
+    {
+        AFEPCalculator* FoundCalc = Cast<AFEPCalculator>(
+            UGameplayStatics::GetActorOfClass(GetWorld(), AFEPCalculatorOptimized::StaticClass())
+        );
+        if (!FoundCalc)
+        {
+            FoundCalc = Cast<AFEPCalculator>(
+                UGameplayStatics::GetActorOfClass(GetWorld(), AFEPCalculator::StaticClass())
+            );
+        }
+        if (FoundCalc)
+        {
+            SetFEPCalculator(FoundCalc);
+            UE_LOG(LogTemp, Log, TEXT("FEPControlWidget: Found FEPCalculator"));
+        }
+    }
+    
+    // Try to find PDBViewer if not set
+    if (!PDBViewer)
+    {
+        APDBViewer* FoundViewer = Cast<APDBViewer>(
+            UGameplayStatics::GetActorOfClass(GetWorld(), APDBViewer::StaticClass())
+        );
+        if (FoundViewer)
+        {
+            SetPDBViewer(FoundViewer);
+            UE_LOG(LogTemp, Log, TEXT("FEPControlWidget: Found PDBViewer"));
+        }
+    }
 }
 
 void UFEPControlWidget::OnFEPProgress(float ProgressPercent)

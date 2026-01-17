@@ -142,6 +142,7 @@ protected:
     void UpdateUIState(bool bIsCalculating);
     FFEPParameters GetParametersFromUI();
     void ExportResultsToFile(const FFEPResult& Result);
+    void EnsureActorsFound();  // Re-find actors if needed
 
 private:
     UPROPERTY()

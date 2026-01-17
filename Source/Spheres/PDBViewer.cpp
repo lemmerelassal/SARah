@@ -394,6 +394,17 @@ void APDBViewer::ParseStructureBondsFromCIF(const FString &Content)
     // Now broadcast events after bonds are applied
     OnResiduesLoaded.Broadcast();
     OnLigandsLoaded.Broadcast();
+    
+    // Optionally calculate interactions automatically if enabled
+    if (bAutoCalculateInteractions)
+    {
+        UE_LOG(LogTemp, Log, TEXT("Auto-calculating interactions..."));
+        CalculateAllInteractions(true, true);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Log, TEXT("Auto-calculate interactions is disabled. Call CalculateAllInteractions() manually if needed."));
+    }
 }
 
 void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>> &ComponentBonds)
@@ -765,6 +776,7 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
                              M->ResidueName == TEXT("H2O") ||
                              M->ResidueName == TEXT("WAT"));
             LigInfo->bIsVisible = bIsWater;
+            LigInfo->bIsWater = bIsWater;
 
             for (const auto &A : P.Value)
             {
@@ -1259,7 +1271,27 @@ FLinearColor APDBViewer::GetElementColor(const FString &E) const
 void APDBViewer::ClearResidueMap()
 {
     for (auto &P : ResidueMap)
+    {
+        if (!P.Value)
+            continue;
+        
+        FResidueInfo* Info = P.Value;
+        
+        // Clear existing mesh components
+        for (auto* M : Info->AtomMeshes)
+        {
+            if (M && IsValid(M))
+                M->DestroyComponent();
+        }
+        
+        for (auto* M : Info->BondMeshes)
+        {
+            if (M && IsValid(M))
+                M->DestroyComponent();
+        }
+        
         delete P.Value;
+    }
     ResidueMap.Empty();
     ChainIDs.Empty();
 }
@@ -1311,34 +1343,35 @@ void APDBViewer::ToggleResidueVisibility(const FString &Key)
             M->SetVisibility(Info->bIsVisible);
 }
 
-TArray<UPDBTreeNode *> APDBViewer::GetChainNodes()
+TArray<UPDBTreeNode*> APDBViewer::GetChainNodes()
 {
-    TArray<UPDBTreeNode *> Nodes;
+    TArray<UPDBTreeNode*> Nodes;
     TArray<FString> SortedChains = ChainIDs.Array();
     SortedChains.Sort();
 
-    for (const FString &ChainID : SortedChains)
+    for (const FString& ChainID : SortedChains)
     {
         FString DisplayName = ChainID == TEXT("_")
                                   ? TEXT("Chain (No ID)")
                                   : FString::Printf(TEXT("Chain %s"), *ChainID);
 
-        UPDBTreeNode *Node = NewObject<UPDBTreeNode>(this);
-        Node->Initialize(DisplayName, ChainID, true, ChainID);
+        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
+        Node->InitializeWithType(DisplayName, ChainID, EPDBNodeType::Chain, ChainID);
         Nodes.Add(Node);
     }
 
     return Nodes;
 }
 
-TArray<UPDBTreeNode *> APDBViewer::GetResidueNodesForChain(const FString &ChainID)
+TArray<UPDBTreeNode*> APDBViewer::GetResidueNodesForChain(const FString& ChainID)
 {
-    TArray<UPDBTreeNode *> Nodes;
+    TArray<UPDBTreeNode*> Nodes;
     TArray<FString> Keys;
     ResidueMap.GetKeys(Keys);
 
-    Keys.Sort([](const FString &A, const FString &B)
-              {
+    // Sort by residue sequence number
+    Keys.Sort([](const FString& A, const FString& B)
+    {
         int32 U1, U2;
         if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
             return A < B;
@@ -1352,22 +1385,143 @@ TArray<UPDBTreeNode *> APDBViewer::GetResidueNodesForChain(const FString &ChainI
             int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
             return NumA < NumB;
         }
-        return A < B; });
+        return A < B;
+    });
 
-    for (const FString &Key : Keys)
+    for (const FString& Key : Keys)
     {
-        const auto *InfoPtr = ResidueMap.Find(Key);
+        const auto* InfoPtr = ResidueMap.Find(Key);
         if (!InfoPtr || !*InfoPtr)
             continue;
 
-        const FResidueInfo *Info = *InfoPtr;
+        const FResidueInfo* Info = *InfoPtr;
         if (Info->Chain != ChainID)
             continue;
 
         FString DisplayName = FString::Printf(TEXT("%s %s"), *Info->ResidueName, *Info->ResidueSeq);
 
-        UPDBTreeNode *Node = NewObject<UPDBTreeNode>(this);
-        Node->Initialize(DisplayName, Key, false, ChainID);
+        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
+        Node->InitializeWithType(DisplayName, Key, EPDBNodeType::Residue, ChainID);
+        Node->bIsVisible = Info->bIsVisible;
+
+        Nodes.Add(Node);
+    }
+
+    return Nodes;
+}
+
+
+TArray<UPDBTreeNode*> APDBViewer::GetWaterNodesForChain(const FString& ChainID)
+{
+    TArray<UPDBTreeNode*> Nodes;
+    TArray<FString> Keys;
+    LigandMap.GetKeys(Keys);
+
+    // Sort by sequence number
+    Keys.Sort([](const FString& A, const FString& B)
+    {
+        int32 U1, U2;
+        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
+            return A < B;
+
+        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
+        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
+
+        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
+        {
+            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
+            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
+            return NumA < NumB;
+        }
+        return A < B;
+    });
+
+    for (const FString& Key : Keys)
+    {
+        // Check if this is a water molecule
+        if (!IsWaterKey(Key))
+            continue;
+
+        const auto* InfoPtr = LigandMap.Find(Key);
+        if (!InfoPtr || !*InfoPtr)
+            continue;
+
+        const FLigandInfo* Info = *InfoPtr;
+        
+        // Extract chain from key (format: "HOH_101_A")
+        TArray<FString> Parts;
+        Key.ParseIntoArray(Parts, TEXT("_"));
+        FString KeyChain = Parts.Num() >= 3 ? Parts[2] : TEXT("_");
+        
+        if (KeyChain != ChainID)
+            continue;
+
+        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
+        Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Water, ChainID);
+        Node->bIsVisible = Info->bIsVisible;
+
+        Nodes.Add(Node);
+    }
+
+    return Nodes;
+}
+
+
+
+TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
+{
+    TArray<UPDBTreeNode*> Nodes;
+    TArray<FString> Keys;
+    LigandMap.GetKeys(Keys);
+
+    // Sort by name then sequence number
+    Keys.Sort([](const FString& A, const FString& B)
+    {
+        int32 U1, U2;
+        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
+            return A < B;
+
+        // First compare residue names
+        FString NameA = A.Left(U1);
+        FString NameB = B.Left(U2);
+        if (NameA != NameB)
+            return NameA < NameB;
+
+        // Then compare sequence numbers
+        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
+        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
+
+        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
+        {
+            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
+            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
+            return NumA < NumB;
+        }
+        return A < B;
+    });
+
+    for (const FString& Key : Keys)
+    {
+        // Skip water molecules - they go in the Water category
+        if (IsWaterKey(Key))
+            continue;
+
+        const auto* InfoPtr = LigandMap.Find(Key);
+        if (!InfoPtr || !*InfoPtr)
+            continue;
+
+        const FLigandInfo* Info = *InfoPtr;
+        
+        // Extract chain from key (format: "ATP_501_A")
+        TArray<FString> Parts;
+        Key.ParseIntoArray(Parts, TEXT("_"));
+        FString KeyChain = Parts.Num() >= 3 ? Parts[2] : TEXT("_");
+        
+        if (KeyChain != ChainID)
+            continue;
+
+        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
+        Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Ligand, ChainID);
         Node->bIsVisible = Info->bIsVisible;
 
         Nodes.Add(Node);
@@ -1402,53 +1556,414 @@ void APDBViewer::ToggleChainVisibility(const FString &ChainID)
     }
 }
 
-void APDBViewer::ToggleNodeVisibility(UPDBTreeNode *Node)
+void APDBViewer::ToggleNodeVisibility(UPDBTreeNode* Node)
 {
     if (!Node)
         return;
 
-    if (Node->bIsChain)
+    switch (Node->NodeType)
     {
-        ToggleChainVisibility(Node->ChainID);
-    }
-    else
-    {
-        ToggleResidueVisibility(Node->NodeKey);
+        case EPDBNodeType::Chain:
+            ToggleChainVisibility(Node->ChainID);
+            break;
+            
+        case EPDBNodeType::ResiduesCategory:
+        case EPDBNodeType::HeteroatomsCategory:
+        case EPDBNodeType::WaterCategory:
+        case EPDBNodeType::LigandsCategory:
+            ToggleCategoryVisibility(Node);
+            break;
+            
+        case EPDBNodeType::Residue:
+            ToggleResidueVisibility(Node->NodeKey);
+            break;
+            
+        case EPDBNodeType::Water:
+        case EPDBNodeType::Ligand:
+            ToggleLigandVisibility(Node->NodeKey);
+            break;
     }
 }
+
+
+void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
+{
+    if (!Node)
+        return;
+    
+    // Determine new visibility by checking first item in category
+    bool bNewVisibility = true;
+    
+    switch (Node->NodeType)
+    {
+        case EPDBNodeType::ResiduesCategory:
+        {
+            // Toggle all residues in this chain
+            for (auto& Pair : ResidueMap)
+            {
+                if (Pair.Value && Pair.Value->Chain == Node->ChainID)
+                {
+                    bNewVisibility = !Pair.Value->bIsVisible;
+                    break;
+                }
+            }
+            
+            for (auto& Pair : ResidueMap)
+            {
+                if (Pair.Value && Pair.Value->Chain == Node->ChainID)
+                {
+                    Pair.Value->bIsVisible = bNewVisibility;
+                    for (auto* M : Pair.Value->AtomMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    for (auto* M : Pair.Value->BondMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                }
+            }
+            break;
+        }
+        
+        case EPDBNodeType::HeteroatomsCategory:
+        {
+            // Toggle all heteroatoms (water + ligands) in this chain
+            for (auto& Pair : LigandMap)
+            {
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                {
+                    bNewVisibility = !Pair.Value->bIsVisible;
+                    break;
+                }
+            }
+            
+            for (auto& Pair : LigandMap)
+            {
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                {
+                    Pair.Value->bIsVisible = bNewVisibility;
+                    for (auto* M : Pair.Value->AtomMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    for (auto* M : Pair.Value->BondMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    UpdateLigandAtomLights(Pair.Value);
+                }
+            }
+            break;
+        }
+        
+        case EPDBNodeType::WaterCategory:
+        {
+            // Toggle all water molecules in this chain
+            for (auto& Pair : LigandMap)
+            {
+                if (!IsWaterKey(Pair.Key))
+                    continue;
+                    
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                {
+                    bNewVisibility = !Pair.Value->bIsVisible;
+                    break;
+                }
+            }
+            
+            for (auto& Pair : LigandMap)
+            {
+                if (!IsWaterKey(Pair.Key))
+                    continue;
+                    
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                {
+                    Pair.Value->bIsVisible = bNewVisibility;
+                    for (auto* M : Pair.Value->AtomMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    for (auto* M : Pair.Value->BondMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    UpdateLigandAtomLights(Pair.Value);
+                }
+            }
+            break;
+        }
+        
+        case EPDBNodeType::LigandsCategory:
+        {
+            // Toggle all ligands (non-water) in this chain
+            for (auto& Pair : LigandMap)
+            {
+                if (IsWaterKey(Pair.Key))
+                    continue;
+                    
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                {
+                    bNewVisibility = !Pair.Value->bIsVisible;
+                    break;
+                }
+            }
+            
+            for (auto& Pair : LigandMap)
+            {
+                if (IsWaterKey(Pair.Key))
+                    continue;
+                    
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                {
+                    Pair.Value->bIsVisible = bNewVisibility;
+                    for (auto* M : Pair.Value->AtomMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    for (auto* M : Pair.Value->BondMeshes)
+                        if (M) M->SetVisibility(bNewVisibility);
+                    UpdateLigandAtomLights(Pair.Value);
+                }
+            }
+            break;
+        }
+        
+        default:
+            break;
+    }
+    
+    // Update the node's visibility state
+    Node->bIsVisible = bNewVisibility;
+}
+
 
 void APDBViewer::PopulateTreeView(UTreeView *TreeView)
 {
     if (!TreeView)
+    {
+        UE_LOG(LogTemp, Error, TEXT("PopulateTreeView called with NULL TreeView!"));
         return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("====== PopulateTreeView starting ======"));
 
     TreeView->ClearListItems();
+    
+    // Force clear any selection
+    TreeView->ClearSelection();
+
+    // CRITICAL FIX: Bind the GetChildren delegate in C++
+    // This tells the TreeView how to get children for each node
+    // UE 5.6 syntax: SetOnGetItemChildren(ObjectPointer, MethodPointer)
+    TreeView->SetOnGetItemChildren(this, &APDBViewer::GetChildrenForNodeInternal);
+    
+    UE_LOG(LogTemp, Warning, TEXT("SetOnGetItemChildren bound to GetChildrenForNodeInternal"));
 
     TArray<UPDBTreeNode *> ChainNodes = GetChainNodes();
+    
+    UE_LOG(LogTemp, Warning, TEXT("Found %d chain nodes"), ChainNodes.Num());
 
     for (UPDBTreeNode *ChainNode : ChainNodes)
     {
         TreeView->AddItem(ChainNode);
+        
+        // Make sure items start collapsed
+        TreeView->SetItemExpansion(ChainNode, false);
+        
+        UE_LOG(LogTemp, Warning, TEXT("Added chain node: %s (bCanExpand: %s)"), 
+               *ChainNode->DisplayName, 
+               ChainNode->bCanExpand ? TEXT("true") : TEXT("false"));
     }
 
     TreeView->RequestRefresh();
+    
+    UE_LOG(LogTemp, Warning, TEXT("====== PopulateTreeView complete ======"));
 }
 
-TArray<UObject *> APDBViewer::GetChildrenForNode(UPDBTreeNode *Node)
+// NEW: Internal callback for UE 5.6 TreeView - uses reference parameter
+void APDBViewer::GetChildrenForNodeInternal(UObject* Item, TArray<UObject*>& OutChildren)
 {
-    TArray<UObject *> ChildNodes;
+    UE_LOG(LogTemp, Warning, TEXT("GetChildrenForNodeInternal called with Item: %s"), Item ? *Item->GetName() : TEXT("NULL"));
+    
+    UPDBTreeNode* Node = Cast<UPDBTreeNode>(Item);
+    if (!Node)
+    {
+        UE_LOG(LogTemp, Error, TEXT("Failed to cast Item to UPDBTreeNode!"));
+        return;
+    }
+    
+    UE_LOG(LogTemp, Warning, TEXT("Node type: %d, DisplayName: %s, NodeKey: %s"), 
+           (int32)Node->NodeType, *Node->DisplayName, *Node->NodeKey);
+    
+    // Call the existing function and copy results to the output array
+    OutChildren = GetChildrenForNode(Node);
+    
+    UE_LOG(LogTemp, Warning, TEXT("GetChildrenForNode returned %d children"), OutChildren.Num());
+    for (int32 i = 0; i < OutChildren.Num(); ++i)
+    {
+        if (UPDBTreeNode* ChildNode = Cast<UPDBTreeNode>(OutChildren[i]))
+        {
+            UE_LOG(LogTemp, Warning, TEXT("  Child %d: %s (Type: %d)"), 
+                   i, *ChildNode->DisplayName, (int32)ChildNode->NodeType);
+        }
+    }
+}
+
+TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
+{
+    TArray<UObject*> ChildNodes;
 
     if (!Node)
         return ChildNodes;
 
-    if (Node->bIsChain)
+    switch (Node->NodeType)
     {
-        TArray<UPDBTreeNode *> Residues = GetResidueNodesForChain(Node->ChainID);
-
-        for (UPDBTreeNode *Residue : Residues)
+        case EPDBNodeType::Chain:
         {
-            ChildNodes.Add(Residue);
+            // Chain has two category children: Residues and Heteroatoms
+            
+            // Get or create "Residues" category node
+            FString ResiduesKey = FString::Printf(TEXT("RESIDUES_%s"), *Node->ChainID);
+            UPDBTreeNode** ResiduesCategoryPtr = TreeNodeCache.Find(ResiduesKey);
+            UPDBTreeNode* ResiduesCategory = nullptr;
+            
+            if (ResiduesCategoryPtr && *ResiduesCategoryPtr)
+            {
+                ResiduesCategory = *ResiduesCategoryPtr;
+            }
+            else
+            {
+                ResiduesCategory = NewObject<UPDBTreeNode>(this);
+                ResiduesCategory->InitializeWithType(TEXT("Residues"), ResiduesKey,
+                    EPDBNodeType::ResiduesCategory, Node->ChainID);
+                TreeNodeCache.Add(ResiduesKey, ResiduesCategory);
+            }
+            ChildNodes.Add(ResiduesCategory);
+            
+            // Get or create "Heteroatoms" category node (only if there are any)
+            bool bHasHeteroatoms = false;
+            for (const auto& Pair : LigandMap)
+            {
+                TArray<FString> Parts;
+                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
+                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID)
+                {
+                    bHasHeteroatoms = true;
+                    break;
+                }
+            }
+            
+            if (bHasHeteroatoms)
+            {
+                FString HeteroatomsKey = FString::Printf(TEXT("HETEROATOMS_%s"), *Node->ChainID);
+                UPDBTreeNode** HeteroatomsCategoryPtr = TreeNodeCache.Find(HeteroatomsKey);
+                UPDBTreeNode* HeteroatomsCategory = nullptr;
+                
+                if (HeteroatomsCategoryPtr && *HeteroatomsCategoryPtr)
+                {
+                    HeteroatomsCategory = *HeteroatomsCategoryPtr;
+                }
+                else
+                {
+                    HeteroatomsCategory = NewObject<UPDBTreeNode>(this);
+                    HeteroatomsCategory->InitializeWithType(TEXT("Heteroatoms"), HeteroatomsKey,
+                        EPDBNodeType::HeteroatomsCategory, Node->ChainID);
+                    TreeNodeCache.Add(HeteroatomsKey, HeteroatomsCategory);
+                }
+                ChildNodes.Add(HeteroatomsCategory);
+            }
+            break;
         }
+        
+        case EPDBNodeType::ResiduesCategory:
+        {
+            // Residues category contains individual residues
+            TArray<UPDBTreeNode*> Residues = GetResidueNodesForChain(Node->ChainID);
+            for (UPDBTreeNode* Residue : Residues)
+            {
+                ChildNodes.Add(Residue);
+            }
+            break;
+        }
+        
+        case EPDBNodeType::HeteroatomsCategory:
+        {
+            // Heteroatoms category contains Water and Ligands subcategories
+            
+            // Check if there are any water molecules for this chain
+            TArray<UPDBTreeNode*> Waters = GetWaterNodesForChain(Node->ChainID);
+            if (Waters.Num() > 0)
+            {
+                FString WaterKey = FString::Printf(TEXT("WATER_%s"), *Node->ChainID);
+                UPDBTreeNode** WaterCategoryPtr = TreeNodeCache.Find(WaterKey);
+                UPDBTreeNode* WaterCategory = nullptr;
+                
+                if (WaterCategoryPtr && *WaterCategoryPtr)
+                {
+                    WaterCategory = *WaterCategoryPtr;
+                }
+                else
+                {
+                    WaterCategory = NewObject<UPDBTreeNode>(this);
+                    WaterCategory->InitializeWithType(
+                        FString::Printf(TEXT("Water (%d)"), Waters.Num()),
+                        WaterKey,
+                        EPDBNodeType::WaterCategory, Node->ChainID);
+                    TreeNodeCache.Add(WaterKey, WaterCategory);
+                }
+                ChildNodes.Add(WaterCategory);
+            }
+            
+            // Check if there are any ligands for this chain
+            TArray<UPDBTreeNode*> Ligands = GetLigandNodesForChain(Node->ChainID);
+            if (Ligands.Num() > 0)
+            {
+                FString LigandsKey = FString::Printf(TEXT("LIGANDS_%s"), *Node->ChainID);
+                UPDBTreeNode** LigandsCategoryPtr = TreeNodeCache.Find(LigandsKey);
+                UPDBTreeNode* LigandsCategory = nullptr;
+                
+                if (LigandsCategoryPtr && *LigandsCategoryPtr)
+                {
+                    LigandsCategory = *LigandsCategoryPtr;
+                }
+                else
+                {
+                    LigandsCategory = NewObject<UPDBTreeNode>(this);
+                    LigandsCategory->InitializeWithType(
+                        FString::Printf(TEXT("Ligands (%d)"), Ligands.Num()),
+                        LigandsKey,
+                        EPDBNodeType::LigandsCategory, Node->ChainID);
+                    TreeNodeCache.Add(LigandsKey, LigandsCategory);
+                }
+                ChildNodes.Add(LigandsCategory);
+            }
+            break;
+        }
+        
+        case EPDBNodeType::WaterCategory:
+        {
+            // Water category contains individual water molecules
+            TArray<UPDBTreeNode*> Waters = GetWaterNodesForChain(Node->ChainID);
+            for (UPDBTreeNode* Water : Waters)
+            {
+                ChildNodes.Add(Water);
+            }
+            break;
+        }
+        
+        case EPDBNodeType::LigandsCategory:
+        {
+            // Ligands category contains individual ligands
+            TArray<UPDBTreeNode*> Ligands = GetLigandNodesForChain(Node->ChainID);
+            for (UPDBTreeNode* Ligand : Ligands)
+            {
+                ChildNodes.Add(Ligand);
+            }
+            break;
+        }
+        
+        default:
+            // Leaf nodes have no children
+            break;
     }
 
     return ChildNodes;
@@ -1711,8 +2226,10 @@ void APDBViewer::ToggleMoleculeVisibility(const FString &MoleculeKey)
     // ===== NEW: UPDATE LIGHTS =====
     UpdateLigandAtomLights(Info);
     // ==============================
-
-    OnLigandsLoaded.Broadcast();
+    
+    // Note: We don't broadcast OnLigandsLoaded here because that event is only for
+    // when ligands are initially loaded from a file, not for visibility changes.
+    // If you need to respond to visibility changes, use a separate event or callback.
 }
 
 void APDBViewer::ToggleMoleculeNodeVisibility(UPDBMoleculeNode *Node)
@@ -1935,7 +2452,19 @@ int32 APDBViewer::GetHydrogenCount() const
 void APDBViewer::ClearCurrentStructure()
 {
     ClearResidueMap();
-    // Remove this line: ClearHydrogens();
+    ClearLigandMap();
+    
+    // Clear tree node cache
+    TreeNodeCache.Empty();
+    
+    // Clear interaction data and meshes
+    for (auto *M : InteractionMeshes)
+        if (M && IsValid(M))
+            M->DestroyComponent();
+    InteractionMeshes.Empty();
+    DetectedInteractions.Empty();
+    
+    // Clear general atom/bond meshes
     for (auto *M : AllAtomMeshes)
         if (M && IsValid(M))
             M->DestroyComponent();
@@ -2138,4 +2667,13 @@ void APDBViewer::LoadSDFFromString(const FString& SDFContent)
 {
     CurrentPDBContent = SDFContent;
     ParseSDF(SDFContent);
+}
+
+
+bool APDBViewer::IsWaterKey(const FString& LigandKey) const
+{
+    // Key format is "ResidueName_ResidueSeq_Chain" e.g., "HOH_101_A"
+    return LigandKey.StartsWith(TEXT("HOH_")) ||
+           LigandKey.StartsWith(TEXT("H2O_")) ||
+           LigandKey.StartsWith(TEXT("WAT_"));
 }

@@ -46,4 +46,14 @@ protected:
     
     UFUNCTION()
     void OnVisibilityChanged(bool bIsChecked);
+    
+private:
+    // Helper to get text color based on node type
+    FLinearColor GetNodeTextColor() const;
+    
+    // Helper to get icon/prefix for node type
+    FString GetNodeIcon() const;
+    
+    // NEW: Helper to get the actual visibility state from the underlying data
+    bool GetActualVisibilityForNode(UPDBTreeNode* Node) const;
 };
