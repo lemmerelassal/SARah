@@ -109,6 +109,19 @@ void AFEPCalculatorOptimized::InitializeSystem(const FString& LigandKey)
 {
     double StartTime = FPlatformTime::Seconds();
     
+    // CRITICAL: Clear ALL old data structures before initializing
+    AtomDataSoA.Empty();
+    NeighborLists.Empty();
+    CellGrid.Empty();
+    LJTables.Empty();
+    
+    // Reset grid dimensions
+    GridSizeX = 0;
+    GridSizeY = 0;
+    GridSizeZ = 0;
+    
+    UE_LOG(LogTemp, Log, TEXT("FEPOptimized: Cleared all old data structures"));
+    
     // Call parent initialization
     Super::InitializeSystem(LigandKey);
     
@@ -133,7 +146,12 @@ void AFEPCalculatorOptimized::InitializeSystem(const FString& LigandKey)
     }
     else if (bUseNeighborLists)
     {
-        NeighborLists.SetNum(CurrentState.Atoms.Num());
+        // Use SoA size if available, otherwise CurrentState size
+        int32 NumAtomsForNeighborList = bUseStructureOfArrays ? AtomDataSoA.NumAtoms() : CurrentState.Atoms.Num();
+        NeighborLists.SetNum(NumAtomsForNeighborList);
+        
+        UE_LOG(LogTemp, Log, TEXT("  Building neighbor lists for %d atoms"), NumAtomsForNeighborList);
+        
         BuildNeighborLists();
         NeighborListRebuildCount = 1;
     }
@@ -189,8 +207,25 @@ void AFEPCalculatorOptimized::LogOptimizationStatus()
 void AFEPCalculatorOptimized::ConvertToSoA()
 {
     int32 NumAtoms = CurrentState.Atoms.Num();
-    AtomDataSoA.Reserve(NumAtoms);
+    
+    // CRITICAL: Completely clear old data first
     AtomDataSoA.Empty();
+    AtomDataSoA.Reserve(NumAtoms);
+    
+    UE_LOG(LogTemp, Log, TEXT("FEPOptimized: Converting %d atoms to SoA"), NumAtoms);
+    
+    // Validation
+    if (NumAtoms == 0)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FEPOptimized: Cannot convert 0 atoms to SoA!"));
+        return;
+    }
+    
+    if (NumAtoms > 100000)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FEPOptimized: Suspiciously large atom count: %d - possible corruption!"), NumAtoms);
+        return;
+    }
     
     for (const FAtomState& Atom : CurrentState.Atoms)
     {
@@ -204,6 +239,8 @@ void AFEPCalculatorOptimized::ConvertToSoA()
         AtomDataSoA.Elements.Add(Atom.Element);
         AtomDataSoA.IsLigandAtom.Add(Atom.bIsLigandAtom);
     }
+    
+    UE_LOG(LogTemp, Log, TEXT("FEPOptimized: SoA conversion complete - %d atoms"), AtomDataSoA.NumAtoms());
 }
 
 void AFEPCalculatorOptimized::ConvertFromSoA()
@@ -242,12 +279,20 @@ void AFEPCalculatorOptimized::BuildNeighborLists()
             NeighborLists[i].LastUpdatePosition = Pos1;
         });
         
-        // Second pass to add reverse neighbors
+        // Second pass to add reverse neighbors with bounds checking
         for (int32 i = 0; i < NumAtoms; ++i)
         {
             for (int32 j : NeighborLists[i].Neighbors)
             {
-                NeighborLists[j].Neighbors.Add(i);
+                // Critical: Bounds check before accessing
+                if (j >= 0 && j < NumAtoms && j < NeighborLists.Num())
+                {
+                    NeighborLists[j].Neighbors.AddUnique(i);  // Use AddUnique to avoid duplicates
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Error, TEXT("FEPOptimized: Invalid neighbor index! i=%d, j=%d, NumAtoms=%d"), i, j, NumAtoms);
+                }
             }
         }
     }
@@ -293,6 +338,22 @@ void AFEPCalculatorOptimized::BuildNeighborLists()
 void AFEPCalculatorOptimized::BuildCellGrid()
 {
     const int32 NumAtoms = AtomDataSoA.NumAtoms();
+    
+    // Validation
+    if (NumAtoms == 0)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FEPOptimized: Cannot build cell grid with 0 atoms!"));
+        return;
+    }
+    
+    if (NumAtoms > 100000)
+    {
+        UE_LOG(LogTemp, Error, TEXT("FEPOptimized: NumAtoms=%d is suspiciously large! Aborting cell grid build."), NumAtoms);
+        return;
+    }
+    
+    // Clear old grid completely
+    CellGrid.Empty();
     
     // Calculate grid bounds
     GridMin = AtomDataSoA.Positions[0];
@@ -741,6 +802,13 @@ void AFEPCalculatorOptimized::CalculateForcesOptimized(float Lambda)
         
         for (int32 j : NeighborLists[i].Neighbors)
         {
+            // CRITICAL: Bounds check before array access
+            if (j < 0 || j >= NumAtoms)
+            {
+                UE_LOG(LogTemp, Error, TEXT("FEPOptimized: Invalid neighbor index in force calc! i=%d, j=%d, NumAtoms=%d"), i, j, NumAtoms);
+                continue;  // Skip this neighbor
+            }
+            
             if (j <= i) continue;
             
             const FVector& Pos2 = AtomDataSoA.Positions[j];

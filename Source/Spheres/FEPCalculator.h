@@ -174,7 +174,19 @@ struct FFEPParameters
     float CutoffDistance = 12.0f; // Angstroms
     
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|ForceField")
-    bool bUseReactionField = true; // Reaction field correction
+    bool bUseReactionField = false; // Reaction field correction (simple)
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|ForceField")
+    bool bUseParticleMeshEwald = true; // PME for electrostatics (accurate)
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|ForceField", meta = (EditCondition = "bUseParticleMeshEwald"))
+    int32 PMEGridSize = 32; // Grid points per dimension (32x32x32)
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|ForceField", meta = (EditCondition = "bUseParticleMeshEwald"))
+    float PMEAlpha = 0.3f; // Ewald splitting parameter (1/Angstroms)
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|ForceField", meta = (EditCondition = "bUseParticleMeshEwald"))
+    int32 PMESplineOrder = 4; // B-spline interpolation order
     
     // Restraints
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Restraints")
@@ -290,6 +302,22 @@ public:
     // Auto-export results when complete
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Automation")
     bool bAutoExportResults = true;
+    
+    // Energy minimization before FEP
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Minimization")
+    bool bPerformEnergyMinimization = true;
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Minimization", meta = (EditCondition = "bPerformEnergyMinimization"))
+    int32 MinimizationMaxSteps = 5000;  // Increased from 1000
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Minimization", meta = (EditCondition = "bPerformEnergyMinimization"))
+    float MinimizationForceThreshold = 50.0f;  // kcal/mol/Å - increased tolerance
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Minimization", meta = (EditCondition = "bPerformEnergyMinimization"))
+    float MinimizationStepSize = 0.001f;  // Angstroms - reduced for stability
+    
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "FEP|Minimization", meta = (EditCondition = "bPerformEnergyMinimization"))
+    bool bMoveProteinDuringMinimization = false;  // Keep protein fixed by default
 
 protected:
     virtual void BeginPlay() override;
@@ -339,6 +367,10 @@ protected:  // All members protected to allow derived classes to access
     // Queue processing
     void ProcessNextInQueue();
     
+    // Energy minimization
+    void MinimizeEnergy();
+    float CalculateMaxForce();
+    
     // Energy calculations - now virtual for overriding
     virtual float CalculateTotalEnergy(float Lambda);
     virtual float CalculateElectrostaticEnergy(float Lambda);
@@ -371,6 +403,22 @@ protected:  // All members protected to allow derived classes to access
     
     // Error estimation
     float CalculateBlockAverageError(const TArray<float>& Data);
+    
+    // Particle Mesh Ewald (PME) for electrostatics
+    void InitializePME();
+    float CalculatePMEElectrostatics(float Lambda);
+    void CalculatePMEForces(float Lambda);
+    void SpreadChargesToGrid();
+    void SolvePoisson3D();
+    void InterpolateForces();
+    
+    // PME data structures
+    TArray<float> ChargeGrid;  // 3D grid of charges
+    TArray<FVector> ForceGrid; // 3D grid of electric field
+    FVector GridOrigin;
+    FVector GridSpacing;
+    int32 GridNx, GridNy, GridNz;
+    bool bPMEInitialized;
     
     // Visualization meshes
     UPROPERTY()
