@@ -388,7 +388,7 @@ void APDBViewer::ParseStructureBondsFromCIF(const FString &Content)
 
     UE_LOG(LogTemp, Log, TEXT("Parsed bond data for %d component types from mmCIF"), ComponentBonds.Num());
 
-    // Apply bonds to all residues and ligands
+    // Apply bonds to all residues and ligands (includes peptide bonds)
     ApplyBondsToResidues(ComponentBonds);
 
     // Now broadcast events after bonds are applied
@@ -582,6 +582,92 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
 
                 LigInfo->BondPairs.Add(TPair<int32, int32>(ParentIdx, HIdx));
                 LigInfo->BondOrders.Add(1);
+            }
+        }
+    }
+
+    // ===== CREATE PEPTIDE BONDS BETWEEN CONSECUTIVE RESIDUES =====
+    // Group residues by chain
+    TMap<FString, TArray<FResidueInfo*>> ResiduesByChain;
+    for (auto& Pair : ResidueMap)
+    {
+        FResidueInfo* ResInfo = Pair.Value;
+        if (ResInfo)
+        {
+            ResiduesByChain.FindOrAdd(ResInfo->Chain).Add(ResInfo);
+        }
+    }
+
+    // For each chain, sort residues by sequence number and create peptide bonds
+    for (auto& ChainPair : ResiduesByChain)
+    {
+        TArray<FResidueInfo*>& Residues = ChainPair.Value;
+
+        // Sort residues by sequence number
+        Residues.Sort([](const FResidueInfo& A, const FResidueInfo& B)
+        {
+            return FCString::Atoi(*A.ResidueSeq) < FCString::Atoi(*B.ResidueSeq);
+        });
+
+        // Create peptide bonds between consecutive residues
+        for (int32 i = 0; i < Residues.Num() - 1; ++i)
+        {
+            FResidueInfo* CurrentRes = Residues[i];
+            FResidueInfo* NextRes = Residues[i + 1];
+
+            if (!CurrentRes || !NextRes)
+                continue;
+
+            // Check if residues are actually consecutive
+            int32 CurrentSeq = FCString::Atoi(*CurrentRes->ResidueSeq);
+            int32 NextSeq = FCString::Atoi(*NextRes->ResidueSeq);
+
+            if (NextSeq != CurrentSeq + 1)
+                continue; // Skip if not consecutive
+
+            // Find C atom (carbonyl carbon) in current residue
+            int32 CIndex = -1;
+            for (int32 j = 0; j < CurrentRes->AtomNames.Num(); ++j)
+            {
+                if (CurrentRes->AtomNames[j] == TEXT("C"))
+                {
+                    CIndex = j;
+                    break;
+                }
+            }
+
+            // Find N atom in next residue
+            int32 NIndex = -1;
+            for (int32 j = 0; j < NextRes->AtomNames.Num(); ++j)
+            {
+                if (NextRes->AtomNames[j] == TEXT("N"))
+                {
+                    NIndex = j;
+                    break;
+                }
+            }
+
+            // Create peptide bond if both atoms found
+            if (CIndex != -1 && NIndex != -1)
+            {
+                FVector CPos = CurrentRes->AtomPositions[CIndex];
+                FVector NPos = NextRes->AtomPositions[NIndex];
+
+                // Scale positions for drawing
+                FVector ScaledCPos = CPos * PDB::SCALE;
+                FVector ScaledNPos = NPos * PDB::SCALE;
+
+                // Draw peptide bond and store mesh in current residue
+                FString CElement = CurrentRes->AtomElements[CIndex];
+                FString NElement = NextRes->AtomElements[NIndex];
+
+                DrawBond(ScaledCPos, ScaledNPos, 1, CElement, NElement,
+                         GetRootComponent(), CurrentRes->BondMeshes);
+
+                UE_LOG(LogTemp, Log, TEXT("Created peptide bond: %s %s C to %s %s N (distance: %.2f A)"),
+                       *CurrentRes->ResidueName, *CurrentRes->ResidueSeq,
+                       *NextRes->ResidueName, *NextRes->ResidueSeq,
+                       FVector::Dist(CPos, NPos));
             }
         }
     }
@@ -863,6 +949,13 @@ void APDBViewer::GenerateHydrogensForResidue(FResidueInfo *ResInfo)
     for (const auto &HPair : Hydrogens)
     {
         int32 ParentIdx = HPair.Value;
+
+        // Skip hydrogens on backbone carbonyl carbon (C) - it bonds to next residue's N
+        if (ResInfo->AtomNames.IsValidIndex(ParentIdx) &&
+            ResInfo->AtomNames[ParentIdx] == TEXT("C"))
+        {
+            continue;
+        }
 
         // Store UNSCALED hydrogen position
         int32 HIdx = ResInfo->AtomPositions.Add(HPair.Key);

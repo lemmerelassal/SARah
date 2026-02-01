@@ -10,7 +10,7 @@
 UInteractionControlWidget::UInteractionControlWidget(const FObjectInitializer& ObjectInitializer)
     : Super(ObjectInitializer)
 {
-    bAutoCalculateOnLoad = true;
+    bAutoCalculateOnLoad = false;
     bShowDetailedList = true;
 }
 
