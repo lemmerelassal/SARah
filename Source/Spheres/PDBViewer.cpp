@@ -140,37 +140,17 @@ void APDBViewer::OnLigandsLoadedHandler()
 
     DebugPrintLigandInfo();
 
-    // Just update hydrogen visibility for ligands
+    // OPTIMIZED: Use consolidated helper for hydrogen visibility
     for (auto &Pair : LigandMap)
     {
-        if (!Pair.Value)
-            continue;
-
-        FLigandInfo *Info = Pair.Value;
-
-        // Update visibility for hydrogen atoms
-        for (int32 i = 0; i < Info->AtomElements.Num(); ++i)
+        if (Pair.Value)
         {
-            if (Info->AtomElements[i] == TEXT("H") && Info->AtomMeshes.IsValidIndex(i))
-                Info->AtomMeshes[i]->SetVisibility(bHydrogensVisible && Info->bIsVisible);
+            UpdateLigandHydrogenVisibility(Pair.Value, bHydrogensVisible);
+
+            // ===== NEW: CREATE LIGAND ATOM LIGHTS =====
+            CreateLigandAtomLights(Pair.Value);
+            // ==========================================
         }
-
-        // Update visibility for bonds involving hydrogens
-        for (int32 i = 0; i < Info->BondPairs.Num(); ++i)
-        {
-            int32 A1 = Info->BondPairs[i].Key;
-            int32 A2 = Info->BondPairs[i].Value;
-
-            bool bHasH = (Info->AtomElements.IsValidIndex(A1) && Info->AtomElements[A1] == TEXT("H")) ||
-                         (Info->AtomElements.IsValidIndex(A2) && Info->AtomElements[A2] == TEXT("H"));
-
-            if (bHasH && Info->BondMeshes.IsValidIndex(i))
-                Info->BondMeshes[i]->SetVisibility(bHydrogensVisible && Info->bIsVisible);
-        }
-        
-        // ===== NEW: CREATE LIGAND ATOM LIGHTS =====
-        CreateLigandAtomLights(Info);
-        // ==========================================
     }
 
     int32 TotalH = GetHydrogenCount();
@@ -608,10 +588,10 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
     {
         TArray<FResidueInfo*>& Residues = ChainPair.Value;
 
-        // Sort residues by sequence number
+        // Sort residues by sequence number - OPTIMIZED: Use cached value
         Residues.Sort([](const FResidueInfo& A, const FResidueInfo& B)
         {
-            return FCString::Atoi(*A.ResidueSeq) < FCString::Atoi(*B.ResidueSeq);
+            return A.CachedSequenceNumber < B.CachedSequenceNumber;
         });
 
         // Create peptide bonds between consecutive residues
@@ -623,9 +603,9 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
             if (!CurrentRes || !NextRes)
                 continue;
 
-            // Check if residues are actually consecutive
-            int32 CurrentSeq = FCString::Atoi(*CurrentRes->ResidueSeq);
-            int32 NextSeq = FCString::Atoi(*NextRes->ResidueSeq);
+            // Check if residues are actually consecutive - OPTIMIZED: Use cached values
+            int32 CurrentSeq = CurrentRes->CachedSequenceNumber;
+            int32 NextSeq = NextRes->CachedSequenceNumber;
 
             if (NextSeq != CurrentSeq + 1)
                 continue; // Skip if not consecutive
@@ -976,6 +956,7 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
             auto *Info = new FResidueInfo();
             Info->ResidueName = M->ResidueName;
             Info->ResidueSeq = M->ResidueSeq;
+            Info->CachedSequenceNumber = FCString::Atoi(*M->ResidueSeq);  // OPTIMIZED: Cache for sorting
             Info->Chain = M->Chain;
             Info->RecordType = M->RecordType;
             Info->bIsVisible = true;
@@ -1573,42 +1554,30 @@ TArray<UPDBTreeNode*> APDBViewer::GetChainNodes()
 TArray<UPDBTreeNode*> APDBViewer::GetResidueNodesForChain(const FString& ChainID)
 {
     TArray<UPDBTreeNode*> Nodes;
-    TArray<FString> Keys;
-    ResidueMap.GetKeys(Keys);
 
-    // Sort by residue sequence number
-    Keys.Sort([](const FString& A, const FString& B)
+    // OPTIMIZED: Build array of residues for this chain, then sort by cached sequence number
+    TArray<TPair<FString, FResidueInfo*>> ChainResidues;
+    for (const auto& Pair : ResidueMap)
     {
-        int32 U1, U2;
-        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
-            return A < B;
-
-        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
-        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
-
-        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
+        if (Pair.Value && Pair.Value->Chain == ChainID)
         {
-            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
-            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
-            return NumA < NumB;
+            ChainResidues.Add(TPair<FString, FResidueInfo*>(Pair.Key, Pair.Value));
         }
-        return A < B;
+    }
+
+    // Sort by cached sequence number - avoids string parsing
+    ChainResidues.Sort([](const TPair<FString, FResidueInfo*>& A, const TPair<FString, FResidueInfo*>& B)
+    {
+        return A.Value->CachedSequenceNumber < B.Value->CachedSequenceNumber;
     });
 
-    for (const FString& Key : Keys)
+    for (const auto& Pair : ChainResidues)
     {
-        const auto* InfoPtr = ResidueMap.Find(Key);
-        if (!InfoPtr || !*InfoPtr)
-            continue;
-
-        const FResidueInfo* Info = *InfoPtr;
-        if (Info->Chain != ChainID)
-            continue;
-
+        const FResidueInfo* Info = Pair.Value;
         FString DisplayName = FString::Printf(TEXT("%s %s"), *Info->ResidueName, *Info->ResidueSeq);
 
         UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
-        Node->InitializeWithType(DisplayName, Key, EPDBNodeType::Residue, ChainID);
+        Node->InitializeWithType(DisplayName, Pair.Key, EPDBNodeType::Residue, ChainID);
         Node->bIsVisible = Info->bIsVisible;
 
         Nodes.Add(Node);
@@ -2166,24 +2135,29 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
 
 TArray<FString> APDBViewer::GetResidueList() const
 {
-    TArray<FString> List;
-    ResidueMap.GetKeys(List);
-    List.Sort([](const FString &A, const FString &B)
-              {
-        int32 U1, U2;
-        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
-            return A < B;
-
-        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
-        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
-
-        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
+    // OPTIMIZED: Build array with cached sequence numbers, then sort
+    TArray<TPair<FString, int32>> KeySeqPairs;
+    for (const auto& Pair : ResidueMap)
+    {
+        if (Pair.Value)
         {
-            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
-            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
-            return NumA < NumB;
+            KeySeqPairs.Add(TPair<FString, int32>(Pair.Key, Pair.Value->CachedSequenceNumber));
         }
-        return A < B; });
+    }
+
+    // Sort by cached sequence number - avoids string parsing
+    KeySeqPairs.Sort([](const TPair<FString, int32>& A, const TPair<FString, int32>& B)
+    {
+        return A.Value < B.Value;
+    });
+
+    // Extract just the keys
+    TArray<FString> List;
+    List.Reserve(KeySeqPairs.Num());
+    for (const auto& Pair : KeySeqPairs)
+    {
+        List.Add(Pair.Key);
+    }
     return List;
 }
 
@@ -2497,59 +2471,75 @@ void APDBViewer::DebugPrintLigandInfo()
     UE_LOG(LogTemp, Log, TEXT("======================"));
 }
 
+// ===== OPTIMIZATION: Consolidated Hydrogen Visibility Helpers =====
+void APDBViewer::UpdateLigandHydrogenVisibility(FLigandInfo* LigInfo, bool bVisible)
+{
+    if (!LigInfo)
+        return;
+
+    // Update visibility for hydrogen atoms
+    for (int32 i = 0; i < LigInfo->AtomElements.Num(); ++i)
+    {
+        if (LigInfo->AtomElements[i] == TEXT("H") && LigInfo->AtomMeshes.IsValidIndex(i))
+            LigInfo->AtomMeshes[i]->SetVisibility(bVisible && LigInfo->bIsVisible);
+    }
+
+    // Update visibility for bonds involving hydrogens
+    for (int32 i = 0; i < LigInfo->BondPairs.Num(); ++i)
+    {
+        int32 A1 = LigInfo->BondPairs[i].Key;
+        int32 A2 = LigInfo->BondPairs[i].Value;
+
+        bool bHasH = (LigInfo->AtomElements.IsValidIndex(A1) && LigInfo->AtomElements[A1] == TEXT("H")) ||
+                     (LigInfo->AtomElements.IsValidIndex(A2) && LigInfo->AtomElements[A2] == TEXT("H"));
+
+        if (bHasH && LigInfo->BondMeshes.IsValidIndex(i))
+            LigInfo->BondMeshes[i]->SetVisibility(bVisible && LigInfo->bIsVisible);
+    }
+}
+
+void APDBViewer::UpdateResidueHydrogenVisibility(FResidueInfo* ResInfo, bool bVisible)
+{
+    if (!ResInfo)
+        return;
+
+    // Update visibility for hydrogen atoms
+    for (int32 i = 0; i < ResInfo->AtomElements.Num(); ++i)
+    {
+        if (ResInfo->AtomElements[i] == TEXT("H") && ResInfo->AtomMeshes.IsValidIndex(i))
+            ResInfo->AtomMeshes[i]->SetVisibility(bVisible && ResInfo->bIsVisible);
+    }
+
+    // Update visibility for bonds involving hydrogens
+    for (int32 i = 0; i < ResInfo->BondPairs.Num(); ++i)
+    {
+        int32 A1 = ResInfo->BondPairs[i].Key;
+        int32 A2 = ResInfo->BondPairs[i].Value;
+
+        bool bHasH = (ResInfo->AtomElements.IsValidIndex(A1) && ResInfo->AtomElements[A1] == TEXT("H")) ||
+                     (ResInfo->AtomElements.IsValidIndex(A2) && ResInfo->AtomElements[A2] == TEXT("H"));
+
+        if (bHasH && ResInfo->BondMeshes.IsValidIndex(i))
+            ResInfo->BondMeshes[i]->SetVisibility(bVisible && ResInfo->bIsVisible);
+    }
+}
+
 void APDBViewer::AddExplicitHydrogens()
 {
     if (bHydrogensVisible)
         return;
 
-    // Show hydrogens for ligands
+    // OPTIMIZED: Use consolidated helpers for hydrogen visibility
     for (auto &Pair : LigandMap)
     {
-        if (!Pair.Value)
-            continue;
-
-        for (int32 i = 0; i < Pair.Value->AtomElements.Num(); ++i)
-        {
-            if (Pair.Value->AtomElements[i] == TEXT("H") && Pair.Value->AtomMeshes.IsValidIndex(i))
-                Pair.Value->AtomMeshes[i]->SetVisibility(Pair.Value->bIsVisible);
-        }
-
-        for (int32 i = 0; i < Pair.Value->BondPairs.Num(); ++i)
-        {
-            int32 A1 = Pair.Value->BondPairs[i].Key;
-            int32 A2 = Pair.Value->BondPairs[i].Value;
-
-            bool bHasBond = (Pair.Value->AtomElements.IsValidIndex(A1) && Pair.Value->AtomElements[A1] == TEXT("H")) ||
-                            (Pair.Value->AtomElements.IsValidIndex(A2) && Pair.Value->AtomElements[A2] == TEXT("H"));
-
-            if (bHasBond && Pair.Value->BondMeshes.IsValidIndex(i))
-                Pair.Value->BondMeshes[i]->SetVisibility(Pair.Value->bIsVisible);
-        }
+        if (Pair.Value)
+            UpdateLigandHydrogenVisibility(Pair.Value, true);
     }
 
-    // Show hydrogens for residues
     for (auto &Pair : ResidueMap)
     {
-        if (!Pair.Value)
-            continue;
-
-        for (int32 i = 0; i < Pair.Value->AtomElements.Num(); ++i)
-        {
-            if (Pair.Value->AtomElements[i] == TEXT("H") && Pair.Value->AtomMeshes.IsValidIndex(i))
-                Pair.Value->AtomMeshes[i]->SetVisibility(Pair.Value->bIsVisible);
-        }
-
-        for (int32 i = 0; i < Pair.Value->BondPairs.Num(); ++i)
-        {
-            int32 A1 = Pair.Value->BondPairs[i].Key;
-            int32 A2 = Pair.Value->BondPairs[i].Value;
-
-            bool bHasBond = (Pair.Value->AtomElements.IsValidIndex(A1) && Pair.Value->AtomElements[A1] == TEXT("H")) ||
-                            (Pair.Value->AtomElements.IsValidIndex(A2) && Pair.Value->AtomElements[A2] == TEXT("H"));
-
-            if (bHasBond && Pair.Value->BondMeshes.IsValidIndex(i))
-                Pair.Value->BondMeshes[i]->SetVisibility(Pair.Value->bIsVisible);
-        }
+        if (Pair.Value)
+            UpdateResidueHydrogenVisibility(Pair.Value, true);
     }
 
     bHydrogensVisible = true;
@@ -2561,54 +2551,17 @@ void APDBViewer::RemoveExplicitHydrogens()
     if (!bHydrogensVisible)
         return;
 
-    // Hide hydrogens for ligands
+    // OPTIMIZED: Use consolidated helpers for hydrogen visibility
     for (auto &Pair : LigandMap)
     {
-        if (!Pair.Value)
-            continue;
-
-        for (int32 i = 0; i < Pair.Value->AtomElements.Num(); ++i)
-        {
-            if (Pair.Value->AtomElements[i] == TEXT("H") && Pair.Value->AtomMeshes.IsValidIndex(i))
-                Pair.Value->AtomMeshes[i]->SetVisibility(false);
-        }
-
-        for (int32 i = 0; i < Pair.Value->BondPairs.Num(); ++i)
-        {
-            int32 A1 = Pair.Value->BondPairs[i].Key;
-            int32 A2 = Pair.Value->BondPairs[i].Value;
-
-            bool bHasBond = (Pair.Value->AtomElements.IsValidIndex(A1) && Pair.Value->AtomElements[A1] == TEXT("H")) ||
-                            (Pair.Value->AtomElements.IsValidIndex(A2) && Pair.Value->AtomElements[A2] == TEXT("H"));
-
-            if (bHasBond && Pair.Value->BondMeshes.IsValidIndex(i))
-                Pair.Value->BondMeshes[i]->SetVisibility(false);
-        }
+        if (Pair.Value)
+            UpdateLigandHydrogenVisibility(Pair.Value, false);
     }
 
-    // Hide hydrogens for residues
     for (auto &Pair : ResidueMap)
     {
-        if (!Pair.Value)
-            continue;
-
-        for (int32 i = 0; i < Pair.Value->AtomElements.Num(); ++i)
-        {
-            if (Pair.Value->AtomElements[i] == TEXT("H") && Pair.Value->AtomMeshes.IsValidIndex(i))
-                Pair.Value->AtomMeshes[i]->SetVisibility(false);
-        }
-
-        for (int32 i = 0; i < Pair.Value->BondPairs.Num(); ++i)
-        {
-            int32 A1 = Pair.Value->BondPairs[i].Key;
-            int32 A2 = Pair.Value->BondPairs[i].Value;
-
-            bool bHasBond = (Pair.Value->AtomElements.IsValidIndex(A1) && Pair.Value->AtomElements[A1] == TEXT("H")) ||
-                            (Pair.Value->AtomElements.IsValidIndex(A2) && Pair.Value->AtomElements[A2] == TEXT("H"));
-
-            if (bHasBond && Pair.Value->BondMeshes.IsValidIndex(i))
-                Pair.Value->BondMeshes[i]->SetVisibility(false);
-        }
+        if (Pair.Value)
+            UpdateResidueHydrogenVisibility(Pair.Value, false);
     }
 
     bHydrogensVisible = false;

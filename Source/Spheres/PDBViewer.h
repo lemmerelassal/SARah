@@ -117,8 +117,9 @@ struct FResidueInfo
     TArray<TPair<int32, int32>> BondPairs;
     TArray<int32> BondOrders;
     bool bIsVisible = true;
-    
+
     // OPTIMIZED: Cached data
+    int32 CachedSequenceNumber = 0;  // Parsed from ResidueSeq to avoid repeated Atoi() calls
     FVector CachedCenterOfMass;
     bool bCenterOfMassCached = false;
     FVector CachedAromaticCenter;
@@ -507,6 +508,10 @@ protected:
     
     // Hydrogen generation helpers
     int32 AddHydrogensToLigand(FLigandInfo* LigInfo);
+
+    // OPTIMIZATION: Consolidated hydrogen visibility helpers
+    void UpdateLigandHydrogenVisibility(FLigandInfo* LigInfo, bool bVisible);
+    void UpdateResidueHydrogenVisibility(FResidueInfo* ResInfo, bool bVisible);
     
     // ===== NEW: LIGAND LIGHTING HELPERS =====
     
