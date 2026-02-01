@@ -1537,6 +1537,9 @@ TArray<UPDBTreeNode*> APDBViewer::GetChainNodes()
     TArray<FString> SortedChains = ChainIDs.Array();
     SortedChains.Sort();
 
+    // OPTIMIZED: Reserve capacity to avoid reallocations
+    Nodes.Reserve(SortedChains.Num());
+
     for (const FString& ChainID : SortedChains)
     {
         FString DisplayName = ChainID == TEXT("_")
@@ -1565,11 +1568,18 @@ TArray<UPDBTreeNode*> APDBViewer::GetResidueNodesForChain(const FString& ChainID
         }
     }
 
+    // OPTIMIZED: Early exit if no residues found
+    if (ChainResidues.Num() == 0)
+        return Nodes;
+
     // Sort by cached sequence number - avoids string parsing
     ChainResidues.Sort([](const TPair<FString, FResidueInfo*>& A, const TPair<FString, FResidueInfo*>& B)
     {
         return A.Value->CachedSequenceNumber < B.Value->CachedSequenceNumber;
     });
+
+    // OPTIMIZED: Reserve capacity to avoid reallocations
+    Nodes.Reserve(ChainResidues.Num());
 
     for (const auto& Pair : ChainResidues)
     {
@@ -2135,6 +2145,10 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
 
 TArray<FString> APDBViewer::GetResidueList() const
 {
+    // OPTIMIZED: Early exit if no residues
+    if (ResidueMap.Num() == 0)
+        return TArray<FString>();
+
     // OPTIMIZED: Build array with cached sequence numbers, then sort
     TArray<TPair<FString, int32>> KeySeqPairs;
     for (const auto& Pair : ResidueMap)
@@ -2714,17 +2728,21 @@ FLinearColor APDBViewer::GetLightColorForElement(const FString& Element) const
 void APDBViewer::SetLigandAtomLightsEnabled(bool bEnabled)
 {
     bLigandAtomLightsEnabled = bEnabled;
-    
-    // Update all ligand lights
+
+    // OPTIMIZED: Early exit if no ligands
+    if (LigandMap.Num() == 0)
+        return;
+
+    // OPTIMIZED: Only update lights for visible ligands
     for (auto& Pair : LigandMap)
     {
-        if (Pair.Value)
+        if (Pair.Value && Pair.Value->bIsVisible)
         {
             UpdateLigandAtomLights(Pair.Value);
         }
     }
-    
-    UE_LOG(LogTemp, Log, TEXT("Ligand atom lights %s"), 
+
+    UE_LOG(LogTemp, Log, TEXT("Ligand atom lights %s"),
            bEnabled ? TEXT("enabled") : TEXT("disabled"));
 }
 
@@ -2736,11 +2754,15 @@ void APDBViewer::ToggleLigandAtomLights()
 void APDBViewer::SetLigandAtomLightIntensity(float Intensity)
 {
     LigandAtomLightIntensity = Intensity;
-    
-    // Update all existing lights
+
+    // OPTIMIZED: Early exit if no ligands
+    if (LigandMap.Num() == 0)
+        return;
+
+    // OPTIMIZED: Only update lights for visible ligands
     for (auto& Pair : LigandMap)
     {
-        if (Pair.Value)
+        if (Pair.Value && Pair.Value->bIsVisible)
         {
             for (UPointLightComponent* Light : Pair.Value->AtomLights)
             {
@@ -2751,18 +2773,22 @@ void APDBViewer::SetLigandAtomLightIntensity(float Intensity)
             }
         }
     }
-    
+
     UE_LOG(LogTemp, Log, TEXT("Set ligand atom light intensity to %.1f"), Intensity);
 }
 
 void APDBViewer::SetLigandAtomLightRadius(float Radius)
 {
     LigandAtomLightRadius = Radius;
-    
-    // Update all existing lights
+
+    // OPTIMIZED: Early exit if no ligands
+    if (LigandMap.Num() == 0)
+        return;
+
+    // OPTIMIZED: Only update lights for visible ligands
     for (auto& Pair : LigandMap)
     {
-        if (Pair.Value)
+        if (Pair.Value && Pair.Value->bIsVisible)
         {
             for (UPointLightComponent* Light : Pair.Value->AtomLights)
             {
@@ -2773,7 +2799,7 @@ void APDBViewer::SetLigandAtomLightRadius(float Radius)
             }
         }
     }
-    
+
     UE_LOG(LogTemp, Log, TEXT("Set ligand atom light radius to %.1f"), Radius);
 }
 
