@@ -422,6 +422,9 @@ public:
     TMap<FString, FLigandInfo*> LigandMap;
     TMap<FString, FResidueInfo*> ResidueMap;
 
+    // OPTIMIZATION: Cache ligands organized by chain for faster lookups
+    TMap<FString, TArray<FLigandInfo*>> LigandsByChain;
+
     
 
 /*     // Debug: highlight severe overlaps found by MMGBSA
@@ -487,6 +490,14 @@ protected:
     
     FString NormalizeAtomID(const FString& In) const;
     int32 ParseBondOrder(const FString& OrderStr) const;
+
+    // Optimization: Helper to parse ligand key format "NAME_SEQ_CHAIN"
+    static FString GetChainFromLigandKey(const FString& Key);
+    static void ParseLigandKey(const FString& Key, FString& OutName, FString& OutSeq, FString& OutChain);
+
+    // Optimization: Rebuild ligand chain cache
+    void RebuildLigandChainCache();
+
     void DrawSphere(float X, float Y, float Z, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     void DrawBond(const FVector& Start, const FVector& End, int32 Order, const FString& Element1, const FString& Element2, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     FLinearColor GetElementColor(const FString& Element) const;

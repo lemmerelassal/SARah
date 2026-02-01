@@ -33,6 +33,67 @@ namespace PDB
     constexpr float BOND_OFFSET = 8.0f;
 }
 
+// ===== OPTIMIZATION: String Parsing Helpers =====
+FString APDBViewer::GetChainFromLigandKey(const FString& Key)
+{
+    int32 FirstUnderscore = INDEX_NONE;
+    int32 SecondUnderscore = INDEX_NONE;
+
+    if (Key.FindChar('_', FirstUnderscore))
+    {
+        SecondUnderscore = Key.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, FirstUnderscore + 1);
+        if (SecondUnderscore != INDEX_NONE && SecondUnderscore + 1 < Key.Len())
+        {
+            return Key.RightChop(SecondUnderscore + 1);
+        }
+    }
+    return TEXT("");
+}
+
+void APDBViewer::ParseLigandKey(const FString& Key, FString& OutName, FString& OutSeq, FString& OutChain)
+{
+    int32 FirstUnderscore = INDEX_NONE;
+    int32 SecondUnderscore = INDEX_NONE;
+
+    OutName = OutSeq = OutChain = TEXT("");
+
+    if (Key.FindChar('_', FirstUnderscore))
+    {
+        OutName = Key.Left(FirstUnderscore);
+        SecondUnderscore = Key.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, FirstUnderscore + 1);
+
+        if (SecondUnderscore != INDEX_NONE)
+        {
+            OutSeq = Key.Mid(FirstUnderscore + 1, SecondUnderscore - FirstUnderscore - 1);
+            OutChain = Key.RightChop(SecondUnderscore + 1);
+        }
+        else
+        {
+            OutSeq = Key.RightChop(FirstUnderscore + 1);
+        }
+    }
+}
+
+void APDBViewer::RebuildLigandChainCache()
+{
+    LigandsByChain.Empty();
+
+    for (const auto& Pair : LigandMap)
+    {
+        if (Pair.Value)
+        {
+            FString ChainID = GetChainFromLigandKey(Pair.Key);
+            if (!ChainID.IsEmpty())
+            {
+                LigandsByChain.FindOrAdd(ChainID).Add(Pair.Value);
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("Rebuilt ligand chain cache: %d chains, %d total ligands"),
+           LigandsByChain.Num(), LigandMap.Num());
+}
+
 APDBViewer::APDBViewer()
 {
     PrimaryActorTick.bCanEverTick = false;
@@ -390,6 +451,9 @@ void APDBViewer::ParseStructureBondsFromCIF(const FString &Content)
 
     // Apply bonds to all residues and ligands (includes peptide bonds)
     ApplyBondsToResidues(ComponentBonds);
+
+    // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
+    RebuildLigandChainCache();
 
     // Now broadcast events after bonds are applied
     OnResiduesLoaded.Broadcast();
@@ -855,6 +919,9 @@ void APDBViewer::ParseSDF(const FString &Content)
         MoleculeIndex++;
     }
 
+    // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
+    RebuildLigandChainCache();
+
     OnLigandsLoaded.Broadcast();
 }
 
@@ -1083,6 +1150,13 @@ void APDBViewer::ParseLigandCIFForLigand(const FString &Content, const TMap<FStr
     int32 A1 = -1, A2 = -1, BO = -1;
     bool bLoop = false;
 
+    // OPTIMIZATION: Build position->index map to avoid O(n²) search
+    TMap<FVector, int32> PositionToIndex;
+    for (int32 i = 0; i < Info->AtomPositions.Num(); ++i)
+    {
+        PositionToIndex.Add(Info->AtomPositions[i], i);
+    }
+
     for (const auto &L : Lines)
     {
         if (L.StartsWith(TEXT("loop_")))
@@ -1121,14 +1195,25 @@ void APDBViewer::ParseLigandCIFForLigand(const FString &Content, const TMap<FStr
             const auto *P2 = NormPos.Find(ID2);
             if (P1 && P2)
             {
-                // Find atom indices in the stored positions
-                int32 Idx1 = -1, Idx2 = -1;
-                for (int32 i = 0; i < Info->AtomPositions.Num(); ++i)
+                // OPTIMIZED: Use position->index map for O(1) lookup instead of O(n) search
+                const int32* Idx1Ptr = PositionToIndex.Find(*P1);
+                const int32* Idx2Ptr = PositionToIndex.Find(*P2);
+
+                int32 Idx1 = Idx1Ptr ? *Idx1Ptr : -1;
+                int32 Idx2 = Idx2Ptr ? *Idx2Ptr : -1;
+
+                // Fallback to tolerance-based search if exact match not found
+                if (Idx1 < 0 || Idx2 < 0)
                 {
-                    if (Info->AtomPositions[i].Equals(*P1, 0.1f))
-                        Idx1 = i;
-                    if (Info->AtomPositions[i].Equals(*P2, 0.1f))
-                        Idx2 = i;
+                    for (const auto& PosIdxPair : PositionToIndex)
+                    {
+                        if (Idx1 < 0 && PosIdxPair.Key.Equals(*P1, 0.1f))
+                            Idx1 = PosIdxPair.Value;
+                        if (Idx2 < 0 && PosIdxPair.Key.Equals(*P2, 0.1f))
+                            Idx2 = PosIdxPair.Value;
+                        if (Idx1 >= 0 && Idx2 >= 0)
+                            break;
+                    }
                 }
 
                 // Store bond connectivity
@@ -1167,6 +1252,9 @@ void APDBViewer::ParseLigandCIFForLigand(const FString &Content, const TMap<FStr
         else if (bLoop && L.StartsWith(TEXT("data_")))
             break;
     }
+
+    // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
+    RebuildLigandChainCache();
 
     // IMPORTANT: Broadcast after bonds are loaded so hydrogens can be generated
     OnLigandsLoaded.Broadcast();
@@ -1567,11 +1655,9 @@ TArray<UPDBTreeNode*> APDBViewer::GetWaterNodesForChain(const FString& ChainID)
 
         const FLigandInfo* Info = *InfoPtr;
         
-        // Extract chain from key (format: "HOH_101_A")
-        TArray<FString> Parts;
-        Key.ParseIntoArray(Parts, TEXT("_"));
-        FString KeyChain = Parts.Num() >= 3 ? Parts[2] : TEXT("_");
-        
+        // Extract chain from key (format: "HOH_101_A") - OPTIMIZED
+        FString KeyChain = GetChainFromLigandKey(Key);
+
         if (KeyChain != ChainID)
             continue;
 
@@ -1631,10 +1717,8 @@ TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
 
         const FLigandInfo* Info = *InfoPtr;
         
-        // Extract chain from key (format: "ATP_501_A")
-        TArray<FString> Parts;
-        Key.ParseIntoArray(Parts, TEXT("_"));
-        FString KeyChain = Parts.Num() >= 3 ? Parts[2] : TEXT("_");
+        // Extract chain from key (format: "ATP_501_A") - OPTIMIZED
+        FString KeyChain = GetChainFromLigandKey(Key);
         
         if (KeyChain != ChainID)
             continue;
@@ -1746,9 +1830,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
             // Toggle all heteroatoms (water + ligands) in this chain
             for (auto& Pair : LigandMap)
             {
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                // OPTIMIZED: Use helper instead of ParseIntoArray
+                FString LigandChain = GetChainFromLigandKey(Pair.Key);
+                if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     bNewVisibility = !Pair.Value->bIsVisible;
                     break;
@@ -1757,9 +1841,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
             
             for (auto& Pair : LigandMap)
             {
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                // OPTIMIZED: Use helper instead of ParseIntoArray
+                FString LigandChain = GetChainFromLigandKey(Pair.Key);
+                if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
                     for (auto* M : Pair.Value->AtomMeshes)
@@ -1780,9 +1864,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (!IsWaterKey(Pair.Key))
                     continue;
                     
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                // OPTIMIZED: Use helper instead of ParseIntoArray
+                FString LigandChain = GetChainFromLigandKey(Pair.Key);
+                if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     bNewVisibility = !Pair.Value->bIsVisible;
                     break;
@@ -1794,9 +1878,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (!IsWaterKey(Pair.Key))
                     continue;
                     
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                // OPTIMIZED: Use helper instead of ParseIntoArray
+                FString LigandChain = GetChainFromLigandKey(Pair.Key);
+                if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
                     for (auto* M : Pair.Value->AtomMeshes)
@@ -1817,9 +1901,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (IsWaterKey(Pair.Key))
                     continue;
                     
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                // OPTIMIZED: Use helper instead of ParseIntoArray
+                FString LigandChain = GetChainFromLigandKey(Pair.Key);
+                if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     bNewVisibility = !Pair.Value->bIsVisible;
                     break;
@@ -1831,9 +1915,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (IsWaterKey(Pair.Key))
                     continue;
                     
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                // OPTIMIZED: Use helper instead of ParseIntoArray
+                FString LigandChain = GetChainFromLigandKey(Pair.Key);
+                if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
                     for (auto* M : Pair.Value->AtomMeshes)
@@ -1959,17 +2043,9 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             ChildNodes.Add(ResiduesCategory);
             
             // Get or create "Heteroatoms" category node (only if there are any)
-            bool bHasHeteroatoms = false;
-            for (const auto& Pair : LigandMap)
-            {
-                TArray<FString> Parts;
-                Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID)
-                {
-                    bHasHeteroatoms = true;
-                    break;
-                }
-            }
+            // OPTIMIZED: Use chain cache for O(1) lookup instead of full map iteration
+            const TArray<FLigandInfo*>* ChainLigands = LigandsByChain.Find(Node->ChainID);
+            bool bHasHeteroatoms = (ChainLigands && ChainLigands->Num() > 0);
             
             if (bHasHeteroatoms)
             {
