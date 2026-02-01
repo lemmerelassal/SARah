@@ -512,6 +512,9 @@ protected:
     // OPTIMIZATION: Consolidated hydrogen visibility helpers
     void UpdateLigandHydrogenVisibility(FLigandInfo* LigInfo, bool bVisible);
     void UpdateResidueHydrogenVisibility(FResidueInfo* ResInfo, bool bVisible);
+
+    // OPTIMIZATION #16: Batched visibility update helper
+    void SetMeshVisibilityBatched(TArray<UStaticMeshComponent*>& Meshes, bool bVisible);
     
     // ===== NEW: LIGAND LIGHTING HELPERS =====
     

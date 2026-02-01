@@ -163,11 +163,12 @@ void APDBViewer::OnLigandsLoadedHandler()
 void APDBViewer::FetchAndDisplayStructure(const FString &ID)
 {
     CurrentStructureID = ID;
-    FString URL = FString::Printf(TEXT("https://files.rcsb.org/download/%s.pdb"), *ID);
+    // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+    FString URL = TStringBuilder<256>().Append(TEXT("https://files.rcsb.org/download/")).Append(ID).Append(TEXT(".pdb")).ToString();
     FetchFileAsync(URL, [this, ID](bool bOK, const FString &Content)
                    {
         if (bOK) ParsePDB(Content);
-        else FetchFileAsync(FString::Printf(TEXT("https://files.rcsb.org/download/%s.cif"), *ID),
+        else FetchFileAsync(TStringBuilder<256>().Append(TEXT("https://files.rcsb.org/download/")).Append(ID).Append(TEXT(".cif")).ToString(),
             [this](bool bOK2, const FString& C) { if (bOK2) ParseMMCIF(C); }); });
 }
 
@@ -206,10 +207,14 @@ void APDBViewer::ParsePDB(const FString &Content)
 
         ChainIDs.Add(Chain);
 
-        FString Key = FString::Printf(TEXT("%s_%s_%s"),
-                                      *L.Mid(17, 3).TrimStartAndEnd(),
-                                      *L.Mid(22, 4).TrimStartAndEnd(),
-                                      *Chain);
+        // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+        FString Key = TStringBuilder<128>()
+            .Append(L.Mid(17, 3).TrimStartAndEnd())
+            .Append(TEXT("_"))
+            .Append(L.Mid(22, 4).TrimStartAndEnd())
+            .Append(TEXT("_"))
+            .Append(Chain)
+            .ToString();
 
         FString AtomName = L.Mid(12, 4).TrimStartAndEnd();
 
@@ -311,7 +316,14 @@ void APDBViewer::ParseMMCIF(const FString &Content)
         ChainIDs.Add(Chain);
 
         FString Seq = (SI >= 0 && R.IsValidIndex(SI)) ? R[SI] : TEXT("0");
-        FString Key = FString::Printf(TEXT("%s_%s_%s"), *R[RI], *Seq, *Chain);
+        // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+        FString Key = TStringBuilder<128>()
+            .Append(R[RI])
+            .Append(TEXT("_"))
+            .Append(Seq)
+            .Append(TEXT("_"))
+            .Append(Chain)
+            .ToString();
 
         FString AtomName = R[AI];
 
@@ -346,7 +358,12 @@ void APDBViewer::ParseMMCIF(const FString &Content)
 
 void APDBViewer::FetchStructureBondsFromCIF(const FString &StructureID)
 {
-    FString URL = FString::Printf(TEXT("https://files.rcsb.org/download/%s.cif"), *StructureID);
+    // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+    FString URL = TStringBuilder<256>()
+        .Append(TEXT("https://files.rcsb.org/download/"))
+        .Append(StructureID)
+        .Append(TEXT(".cif"))
+        .ToString();
 
     UE_LOG(LogTemp, Log, TEXT("Fetching bond information from mmCIF: %s"), *URL);
 
@@ -708,7 +725,8 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
                 // Store UNSCALED hydrogen position
                 int32 HIdx = LigInfo->AtomPositions.Add(HPair.Key);
                 LigInfo->AtomElements.Add(TEXT("H"));
-                LigInfo->AtomNames.Add(FString::Printf(TEXT("H%d"), HIdx));
+                // OPTIMIZATION #9: Use Appendf for integer formatting
+                LigInfo->AtomNames.Add(TStringBuilder<16>().Appendf(TEXT("H%d"), HIdx).ToString());
 
                 // Apply scaling only when drawing
                 FVector ScaledHPos = HPair.Key * PDB::SCALE;
@@ -749,7 +767,8 @@ void APDBViewer::ParseSDF(const FString &Content)
 
         FString MoleculeName = Lines[LineIndex].TrimStartAndEnd();
         if (MoleculeName.IsEmpty())
-            MoleculeName = FString::Printf(TEXT("MOL%d"), MoleculeIndex + 1);
+            // OPTIMIZATION #9: Use Appendf for integer formatting
+            MoleculeName = TStringBuilder<32>().Appendf(TEXT("MOL%d"), MoleculeIndex + 1).ToString();
 
         int32 CountsLineIndex = -1;
         for (int32 i = LineIndex + 1; i < FMath::Min(LineIndex + 5, Lines.Num()); ++i)
@@ -842,7 +861,8 @@ void APDBViewer::ParseSDF(const FString &Content)
             }
         }
 
-        FString Key = FString::Printf(TEXT("%s"), *MoleculeName);
+        // OPTIMIZATION #9: Key is just MoleculeName
+        FString Key = MoleculeName;
 
         auto *Info = new FLigandInfo();
         Info->LigandName = MoleculeName;
@@ -883,7 +903,8 @@ void APDBViewer::ParseSDF(const FString &Content)
             if (Mesh)
                 Mesh->SetVisibility(Info->bIsVisible);
 
-        LigandMap.Add(FString::Printf(TEXT("%s"), *MoleculeName), Info);
+        // OPTIMIZATION #9: Key is just MoleculeName
+        LigandMap.Add(MoleculeName, Info);
 
         LineIndex = BondStartLine + NumBonds;
         while (LineIndex < Lines.Num())
@@ -916,7 +937,14 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
         if (M->RecordType.StartsWith(TEXT("HETATM")))
         {
             auto *LigInfo = new FLigandInfo();
-            LigInfo->LigandName = FString::Printf(TEXT("%s-%s-%s"), *M->ResidueName, *M->ResidueSeq, *M->Chain);
+            // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+            LigInfo->LigandName = TStringBuilder<128>()
+                .Append(M->ResidueName)
+                .Append(TEXT("-"))
+                .Append(M->ResidueSeq)
+                .Append(TEXT("-"))
+                .Append(M->Chain)
+                .ToString();
 
             // Make water molecules visible by default, hide others
             bool bIsWater = (M->ResidueName == TEXT("HOH") ||
@@ -1034,7 +1062,8 @@ void APDBViewer::GenerateHydrogensForResidue(FResidueInfo *ResInfo)
         // Store UNSCALED hydrogen position
         int32 HIdx = ResInfo->AtomPositions.Add(HPair.Key);
         ResInfo->AtomElements.Add(TEXT("H"));
-        ResInfo->AtomNames.Add(FString::Printf(TEXT("H%d"), HIdx)); // Add atom name
+        // OPTIMIZATION #9: Use Appendf for integer formatting
+        ResInfo->AtomNames.Add(TStringBuilder<16>().Appendf(TEXT("H%d"), HIdx).ToString()); // Add atom name
 
         // Apply scaling only when drawing
         FVector ScaledHPos = HPair.Key * PDB::SCALE;
@@ -1243,10 +1272,23 @@ void APDBViewer::ParseLigandCIFForLigand(const FString &Content, const TMap<FStr
 
 FString APDBViewer::NormalizeAtomID(const FString &In) const
 {
+    // OPTIMIZATION #12: Cache normalized atom IDs to avoid repeated normalization
+    static TMap<FString, FString> NormalizationCache;
+
+    // Check cache first
+    const FString* Cached = NormalizationCache.Find(In);
+    if (Cached)
+    {
+        return *Cached;
+    }
+
+    // Cache miss - normalize and store result
     FString Out;
     for (const TCHAR C : In)
         if (FChar::IsAlnum(C))
             Out.AppendChar(FChar::ToUpper(C));
+
+    NormalizationCache.Add(In, Out);
     return Out;
 }
 
@@ -1450,10 +1492,25 @@ void APDBViewer::ClearOverlapMarkers()
  */
 FLinearColor APDBViewer::GetElementColor(const FString &E) const
 {
+    // OPTIMIZATION #7: Static result cache to avoid repeated ToUpper() calls
+    static TMap<FString, FLinearColor> ResultCache;
+
+    // Check cache first
+    const FLinearColor* Cached = ResultCache.Find(E);
+    if (Cached)
+    {
+        return *Cached;
+    }
+
+    // Cache miss - compute and store result
     static const TMap<FString, FLinearColor> Colors = {
         {TEXT("C"), FLinearColor(0.1f, 0.1f, 0.1f)}, {TEXT("O"), FLinearColor::Red}, {TEXT("H"), FLinearColor::White}, {TEXT("D"), FLinearColor::White}, {TEXT("N"), FLinearColor::Blue}, {TEXT("S"), FLinearColor::Yellow}, {TEXT("CL"), FLinearColor(0, 1, 0)}, {TEXT("P"), FLinearColor(1, 0.5f, 0)}, {TEXT("F"), FLinearColor(0, 1, 0)}, {TEXT("BR"), FLinearColor(0.6f, 0.2f, 0.2f)}, {TEXT("I"), FLinearColor(0.4f, 0, 0.8f)}, {TEXT("FE"), FLinearColor(0.8f, 0.4f, 0)}, {TEXT("MG"), FLinearColor(0, 0.8f, 0)}, {TEXT("ZN"), FLinearColor(0.5f, 0.5f, 0.5f)}, {TEXT("CA"), FLinearColor(0.2f, 0.6f, 1)}, {TEXT("NA"), FLinearColor(0, 0, 1)}, {TEXT("K"), FLinearColor(0.5f, 0, 1)}, {TEXT("CU"), FLinearColor(1, 0.5f, 0)}, {TEXT("B"), FLinearColor(1, 0.7f, 0.7f)}};
     const auto *C = Colors.Find(E.ToUpper());
-    return C ? *C : FLinearColor::Gray;
+    FLinearColor Result = C ? *C : FLinearColor::Gray;
+
+    // Store in cache for future lookups
+    ResultCache.Add(E, Result);
+    return Result;
 }
 
 void APDBViewer::ClearResidueMap()
@@ -1523,12 +1580,9 @@ void APDBViewer::ToggleResidueVisibility(const FString &Key)
         return;
     auto *Info = *InfoPtr;
     Info->bIsVisible = !Info->bIsVisible;
-    for (auto *M : Info->AtomMeshes)
-        if (M)
-            M->SetVisibility(Info->bIsVisible);
-    for (auto *M : Info->BondMeshes)
-        if (M)
-            M->SetVisibility(Info->bIsVisible);
+    // OPTIMIZATION #16: Use batched visibility updates
+    SetMeshVisibilityBatched(Info->AtomMeshes, Info->bIsVisible);
+    SetMeshVisibilityBatched(Info->BondMeshes, Info->bIsVisible);
 }
 
 TArray<UPDBTreeNode*> APDBViewer::GetChainNodes()
@@ -1542,9 +1596,10 @@ TArray<UPDBTreeNode*> APDBViewer::GetChainNodes()
 
     for (const FString& ChainID : SortedChains)
     {
+        // OPTIMIZATION #9: Use FStringBuilder instead of Printf
         FString DisplayName = ChainID == TEXT("_")
                                   ? TEXT("Chain (No ID)")
-                                  : FString::Printf(TEXT("Chain %s"), *ChainID);
+                                  : TStringBuilder<64>().Append(TEXT("Chain ")).Append(ChainID).ToString();
 
         UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
         Node->InitializeWithType(DisplayName, ChainID, EPDBNodeType::Chain, ChainID);
@@ -1584,7 +1639,12 @@ TArray<UPDBTreeNode*> APDBViewer::GetResidueNodesForChain(const FString& ChainID
     for (const auto& Pair : ChainResidues)
     {
         const FResidueInfo* Info = Pair.Value;
-        FString DisplayName = FString::Printf(TEXT("%s %s"), *Info->ResidueName, *Info->ResidueSeq);
+        // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+        FString DisplayName = TStringBuilder<64>()
+            .Append(Info->ResidueName)
+            .Append(TEXT(" "))
+            .Append(Info->ResidueSeq)
+            .ToString();
 
         UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
         Node->InitializeWithType(DisplayName, Pair.Key, EPDBNodeType::Residue, ChainID);
@@ -1728,12 +1788,9 @@ void APDBViewer::ToggleChainVisibility(const FString &ChainID)
             }
 
             Pair.Value->bIsVisible = bNewVisibility;
-            for (auto *M : Pair.Value->AtomMeshes)
-                if (M)
-                    M->SetVisibility(bNewVisibility);
-            for (auto *M : Pair.Value->BondMeshes)
-                if (M)
-                    M->SetVisibility(bNewVisibility);
+            // OPTIMIZATION #16: Use batched visibility updates
+            SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+            SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
         }
     }
 }
@@ -1795,10 +1852,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (Pair.Value && Pair.Value->Chain == Node->ChainID)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
-                    for (auto* M : Pair.Value->AtomMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
-                    for (auto* M : Pair.Value->BondMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
+                    // OPTIMIZATION #16: Use batched visibility updates
+                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
                 }
             }
             break;
@@ -1825,10 +1881,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
-                    for (auto* M : Pair.Value->AtomMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
-                    for (auto* M : Pair.Value->BondMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
+                    // OPTIMIZATION #16: Use batched visibility updates
+                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
                     UpdateLigandAtomLights(Pair.Value);
                 }
             }
@@ -1862,10 +1917,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
-                    for (auto* M : Pair.Value->AtomMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
-                    for (auto* M : Pair.Value->BondMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
+                    // OPTIMIZATION #16: Use batched visibility updates
+                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
                     UpdateLigandAtomLights(Pair.Value);
                 }
             }
@@ -1899,10 +1953,9 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
                 if (LigandChain == Node->ChainID && Pair.Value)
                 {
                     Pair.Value->bIsVisible = bNewVisibility;
-                    for (auto* M : Pair.Value->AtomMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
-                    for (auto* M : Pair.Value->BondMeshes)
-                        if (M) M->SetVisibility(bNewVisibility);
+                    // OPTIMIZATION #16: Use batched visibility updates
+                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
                     UpdateLigandAtomLights(Pair.Value);
                 }
             }
@@ -2004,7 +2057,8 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             // Chain has two category children: Residues and Heteroatoms
             
             // Get or create "Residues" category node
-            FString ResiduesKey = FString::Printf(TEXT("RESIDUES_%s"), *Node->ChainID);
+            // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+            FString ResiduesKey = TStringBuilder<64>().Append(TEXT("RESIDUES_")).Append(Node->ChainID).ToString();
             UPDBTreeNode** ResiduesCategoryPtr = TreeNodeCache.Find(ResiduesKey);
             UPDBTreeNode* ResiduesCategory = nullptr;
             
@@ -2028,7 +2082,8 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             
             if (bHasHeteroatoms)
             {
-                FString HeteroatomsKey = FString::Printf(TEXT("HETEROATOMS_%s"), *Node->ChainID);
+                // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+                FString HeteroatomsKey = TStringBuilder<64>().Append(TEXT("HETEROATOMS_")).Append(Node->ChainID).ToString();
                 UPDBTreeNode** HeteroatomsCategoryPtr = TreeNodeCache.Find(HeteroatomsKey);
                 UPDBTreeNode* HeteroatomsCategory = nullptr;
                 
@@ -2067,7 +2122,8 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             TArray<UPDBTreeNode*> Waters = GetWaterNodesForChain(Node->ChainID);
             if (Waters.Num() > 0)
             {
-                FString WaterKey = FString::Printf(TEXT("WATER_%s"), *Node->ChainID);
+                // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+                FString WaterKey = TStringBuilder<64>().Append(TEXT("WATER_")).Append(Node->ChainID).ToString();
                 UPDBTreeNode** WaterCategoryPtr = TreeNodeCache.Find(WaterKey);
                 UPDBTreeNode* WaterCategory = nullptr;
                 
@@ -2078,8 +2134,9 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
                 else
                 {
                     WaterCategory = NewObject<UPDBTreeNode>(this);
+                    // OPTIMIZATION #9: Use Appendf for integer formatting
                     WaterCategory->InitializeWithType(
-                        FString::Printf(TEXT("Water (%d)"), Waters.Num()),
+                        TStringBuilder<64>().Appendf(TEXT("Water (%d)"), Waters.Num()).ToString(),
                         WaterKey,
                         EPDBNodeType::WaterCategory, Node->ChainID);
                     TreeNodeCache.Add(WaterKey, WaterCategory);
@@ -2091,7 +2148,8 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             TArray<UPDBTreeNode*> Ligands = GetLigandNodesForChain(Node->ChainID);
             if (Ligands.Num() > 0)
             {
-                FString LigandsKey = FString::Printf(TEXT("LIGANDS_%s"), *Node->ChainID);
+                // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+                FString LigandsKey = TStringBuilder<64>().Append(TEXT("LIGANDS_")).Append(Node->ChainID).ToString();
                 UPDBTreeNode** LigandsCategoryPtr = TreeNodeCache.Find(LigandsKey);
                 UPDBTreeNode* LigandsCategory = nullptr;
                 
@@ -2102,8 +2160,9 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
                 else
                 {
                     LigandsCategory = NewObject<UPDBTreeNode>(this);
+                    // OPTIMIZATION #9: Use Appendf for integer formatting
                     LigandsCategory->InitializeWithType(
-                        FString::Printf(TEXT("Ligands (%d)"), Ligands.Num()),
+                        TStringBuilder<64>().Appendf(TEXT("Ligands (%d)"), Ligands.Num()).ToString(),
                         LigandsKey,
                         EPDBNodeType::LigandsCategory, Node->ChainID);
                     TreeNodeCache.Add(LigandsKey, LigandsCategory);
@@ -2180,16 +2239,18 @@ TArray<FString> APDBViewer::GetLigandList() const { return GetResidueList(); }
 FString APDBViewer::GetResidueDisplayName(const FString &Key) const
 {
     const auto *P = ResidueMap.Find(Key);
+    // OPTIMIZATION #9: Use FStringBuilder instead of Printf
     return (P && *P)
-               ? FString::Printf(TEXT("%s %s"), *(*P)->ResidueName, *(*P)->ResidueSeq)
+               ? TStringBuilder<64>().Append((*P)->ResidueName).Append(TEXT(" ")).Append((*P)->ResidueSeq).ToString()
                : Key;
 }
 
 FString APDBViewer::GetLigandDisplayName(const FString &Key) const
 {
     const auto *P = LigandMap.Find(Key);
+    // OPTIMIZATION #9: Printf with just %s is redundant
     return (P && *P)
-               ? FString::Printf(TEXT("%s"), *(*P)->LigandName)
+               ? (*P)->LigandName
                : Key;
 }
 
@@ -2381,13 +2442,10 @@ void APDBViewer::ToggleMoleculeVisibility(const FString &MoleculeKey)
                 if (!bIsWater)
                 {
                     P.Value->bIsVisible = false;
-                    for (auto *M : P.Value->AtomMeshes)
-                        if (M)
-                            M->SetVisibility(false);
-                    for (auto *M : P.Value->BondMeshes)
-                        if (M)
-                            M->SetVisibility(false);
-                    
+                    // OPTIMIZATION #16: Use batched visibility updates
+                    SetMeshVisibilityBatched(P.Value->AtomMeshes, false);
+                    SetMeshVisibilityBatched(P.Value->BondMeshes, false);
+
                     // ===== NEW: UPDATE LIGHTS =====
                     UpdateLigandAtomLights(P.Value);
                     // ==============================
@@ -2398,13 +2456,9 @@ void APDBViewer::ToggleMoleculeVisibility(const FString &MoleculeKey)
 
     Info->bIsVisible = bNewVisible;
 
-    for (auto *M : Info->AtomMeshes)
-        if (M)
-            M->SetVisibility(Info->bIsVisible);
-
-    for (auto *M : Info->BondMeshes)
-        if (M)
-            M->SetVisibility(Info->bIsVisible);
+    // OPTIMIZATION #16: Use batched visibility updates
+    SetMeshVisibilityBatched(Info->AtomMeshes, Info->bIsVisible);
+    SetMeshVisibilityBatched(Info->BondMeshes, Info->bIsVisible);
 
     // ===== NEW: UPDATE LIGHTS =====
     UpdateLigandAtomLights(Info);
@@ -2535,6 +2589,19 @@ void APDBViewer::UpdateResidueHydrogenVisibility(FResidueInfo* ResInfo, bool bVi
 
         if (bHasH && ResInfo->BondMeshes.IsValidIndex(i))
             ResInfo->BondMeshes[i]->SetVisibility(bVisible && ResInfo->bIsVisible);
+    }
+}
+
+// OPTIMIZATION #16: Batched visibility update helper
+void APDBViewer::SetMeshVisibilityBatched(TArray<UStaticMeshComponent*>& Meshes, bool bVisible)
+{
+    // Batch visibility updates to avoid redundant state changes
+    for (UStaticMeshComponent* Mesh : Meshes)
+    {
+        if (Mesh && Mesh->IsVisible() != bVisible)
+        {
+            Mesh->SetVisibility(bVisible);
+        }
     }
 }
 
