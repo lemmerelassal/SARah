@@ -219,23 +219,8 @@ TArray<UPDBTreeNode*> APDBViewer::GetFilteredNodesForChain(const FString& ChainI
     TArray<FString> Keys;
     LigandMap.GetKeys(Keys);
 
-    // Sort by sequence number using lambda
-    Keys.Sort([](const FString& A, const FString& B) {
-        int32 U1, U2;
-        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
-            return A < B;
-
-        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
-        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
-
-        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
-        {
-            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
-            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
-            return NumA < NumB;
-        }
-        return A < B;
-    });
+    // Sort by sequence number
+    Keys.Sort(GetLigandKeyComparator());
 
     for (const FString& Key : Keys)
     {
@@ -257,6 +242,96 @@ TArray<UPDBTreeNode*> APDBViewer::GetFilteredNodesForChain(const FString& ChainI
     }
 
     return Nodes;
+}
+
+TFunction<bool(const FString&, const FString&)> APDBViewer::GetLigandKeyComparator(bool bSortByName)
+{
+    return [bSortByName](const FString& A, const FString& B) {
+        int32 U1, U2;
+        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
+            return A < B;
+
+        // If sorting by name, compare residue names first
+        if (bSortByName)
+        {
+            FString NameA = A.Left(U1);
+            FString NameB = B.Left(U2);
+            if (NameA != NameB)
+                return NameA < NameB;
+        }
+
+        // Then compare sequence numbers
+        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
+        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
+
+        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
+        {
+            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
+            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
+            return NumA < NumB;
+        }
+        return A < B;
+    };
+}
+
+void APDBViewer::UpdateAllHydrogenVisibility(bool bVisible)
+{
+    for (const auto& Pair : LigandMap)
+        if (Pair.Value)
+            UpdateLigandHydrogenVisibility(Pair.Value, bVisible);
+
+    for (const auto& Pair : ResidueMap)
+        if (Pair.Value)
+            UpdateResidueHydrogenVisibility(Pair.Value, bVisible);
+}
+
+template<typename TMap, typename TPreDelete>
+void APDBViewer::ClearInfoMap(TMap& InfoMap, TPreDelete PreDeleteFunc)
+{
+    for (auto& P : InfoMap)
+    {
+        if (!P.Value)
+            continue;
+
+        DestroyMeshComponents(P.Value->AtomMeshes);
+        DestroyMeshComponents(P.Value->BondMeshes);
+
+        // Use if constexpr to handle nullable lambdas
+        if constexpr (!std::is_same_v<TPreDelete, std::nullptr_t>)
+            PreDeleteFunc(P.Value);
+
+        delete P.Value;
+    }
+    InfoMap.Empty();
+}
+
+TArray<int32> APDBViewer::CountBondOrdersByType(const TArray<int32>& BondOrders)
+{
+    TArray<int32> Counts = {0, 0, 0, 0};  // [Single, Double, Triple, Other]
+
+    for (int32 Order : BondOrders)
+    {
+        if (Order == 1)
+            Counts[0]++;
+        else if (Order == 2)
+            Counts[1]++;
+        else if (Order == 3)
+            Counts[2]++;
+        else
+            Counts[3]++;
+    }
+
+    return Counts;
+}
+
+template<typename K, typename V>
+TArray<K> APDBViewer::ExtractKeysFromPairs(const TArray<TPair<K, V>>& Pairs)
+{
+    TArray<K> Keys;
+    Keys.Reserve(Pairs.Num());
+    for (const auto& Pair : Pairs)
+        Keys.Add(Pair.Key);
+    return Keys;
 }
 
 APDBViewer::APDBViewer()
@@ -356,31 +431,20 @@ FVector APDBViewer::CalculateStructureCenter()
     FVector SumPosition = FVector::ZeroVector;
     int32 TotalAtoms = 0;
 
-    // Sum all residue atom positions
-    for (const auto& Pair : ResidueMap)
-    {
-        if (Pair.Value && Pair.Value->bIsVisible)
-        {
-            for (const FVector& Pos : Pair.Value->AtomPositions)
-            {
-                SumPosition += Pos * PDB::SCALE;
-                TotalAtoms++;
+    // Lambda to accumulate positions from any info map
+    auto AccumulateVisiblePositions = [&](const auto& InfoMap) {
+        for (const auto& Pair : InfoMap) {
+            if (Pair.Value && Pair.Value->bIsVisible) {
+                for (const FVector& Pos : Pair.Value->AtomPositions) {
+                    SumPosition += Pos * PDB::SCALE;
+                    TotalAtoms++;
+                }
             }
         }
-    }
+    };
 
-    // Sum all ligand atom positions
-    for (const auto& Pair : LigandMap)
-    {
-        if (Pair.Value && Pair.Value->bIsVisible)
-        {
-            for (const FVector& Pos : Pair.Value->AtomPositions)
-            {
-                SumPosition += Pos * PDB::SCALE;
-                TotalAtoms++;
-            }
-        }
-    }
+    AccumulateVisiblePositions(ResidueMap);
+    AccumulateVisiblePositions(LigandMap);
 
     if (TotalAtoms > 0)
         return GetActorLocation() + SumPosition / TotalAtoms;
@@ -485,6 +549,8 @@ bool APDBViewer::ShouldBondBeVisibleAtLOD(const FString& Atom1Name, const FStrin
 
 void APDBViewer::SetForcedLODLevel(int32 LODLevel)
 {
+
+    LODLevel = 0;
     ForcedLODLevel = LODLevel;
 
     if (LODLevel >= 0 && LODLevel <= 3)
@@ -1441,11 +1507,6 @@ void APDBViewer::GenerateHydrogensForResidue(FResidueInfo *ResInfo)
 
         // Apply scaling only when drawing
         FVector ScaledHPos = HPair.Key * PDB::SCALE;
-/*         DrawSphere(ScaledHPos.X, ScaledHPos.Y, ScaledHPos.Z, FLinearColor::White,
-                   GetRootComponent(), ResInfo->AtomMeshes); 
-        ResInfo->AtomMeshes.Last()->SetWorldScale3D(FVector(0.3f));
-        ResInfo->AtomMeshes.Last()->SetVisibility(bHydrogensVisible && ResInfo->bIsVisible);*/
-
         // Scale both positions for drawing the bond
         FVector ScaledParent = ResInfo->AtomPositions[ParentIdx] * PDB::SCALE;
         DrawBond(ScaledParent, ScaledHPos, 1,
@@ -1805,82 +1866,6 @@ void APDBViewer::ClearOverlapMarkers()
     OverlapMarkers.Empty();
 }
 
-/* void APDBViewer::HighlightOverlapAtoms(const TArray<FMMOverlapInfo> &Overlaps)
-{
-    ClearOverlapMarkers();
-    if (!SphereMeshAsset || !SphereMaterialAsset || !CylinderMeshAsset)
-        return;
-
-    APlayerController *PC = UGameplayStatics::GetPlayerController(GetWorld(), 0);
-    FVector FirstPos = FVector::ZeroVector;
-    bool bHaveFirst = false;
-
-    for (const FMMOverlapInfo &O : Overlaps)
-    {
-        // Create small red sphere at receptor position
-        auto *S1 = NewObject<UStaticMeshComponent>(this);
-        S1->SetStaticMesh(SphereMeshAsset);
-        S1->SetWorldScale3D(FVector(PDB::SPHERE_SIZE * 0.6f));
-        S1->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-        auto *Mat1 = UMaterialInstanceDynamic::Create(SphereMaterialAsset, S1);
-        Mat1->SetVectorParameterValue(TEXT("Color"), FLinearColor::Red);
-        Mat1->SetScalarParameterValue(TEXT("EmissiveIntensity"), 8.0f);
-        S1->SetMaterial(0, Mat1);
-        S1->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
-        S1->SetWorldLocation(O.ReceptorPosition);
-        S1->RegisterComponent();
-        OverlapMarkers.Add(S1);
-
-        // Create small red sphere at ligand position
-        auto *S2 = NewObject<UStaticMeshComponent>(this);
-        S2->SetStaticMesh(SphereMeshAsset);
-        S2->SetWorldScale3D(FVector(PDB::SPHERE_SIZE * 0.6f));
-        S2->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-        auto *Mat2 = UMaterialInstanceDynamic::Create(SphereMaterialAsset, S2);
-        Mat2->SetVectorParameterValue(TEXT("Color"), FLinearColor::Red);
-        Mat2->SetScalarParameterValue(TEXT("EmissiveIntensity"), 8.0f);
-        S2->SetMaterial(0, Mat2);
-        S2->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
-        S2->SetWorldLocation(O.LigandPosition);
-        S2->RegisterComponent();
-        OverlapMarkers.Add(S2);
-
-        // Create a thin cylinder connecting the two
-        FVector Dir = O.LigandPosition - O.ReceptorPosition;
-        float Len = Dir.Size();
-        if (Len > KINDA_SMALL_NUMBER)
-        {
-            FRotator Rot = FRotationMatrix::MakeFromZ(Dir).Rotator();
-            FVector Mid = O.ReceptorPosition + 0.5f * Dir;
-            auto *Cyl = NewObject<UStaticMeshComponent>(this);
-            Cyl->SetStaticMesh(CylinderMeshAsset);
-            Cyl->SetWorldLocation(Mid);
-            Cyl->SetWorldRotation(Rot);
-            Cyl->SetWorldScale3D(FVector(PDB::CYLINDER_SIZE * 0.4f, PDB::CYLINDER_SIZE * 0.4f, Len / 100.0f));
-            Cyl->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-            auto *MatC = UMaterialInstanceDynamic::Create(SphereMaterialAsset, Cyl);
-            MatC->SetVectorParameterValue(TEXT("Color"), FLinearColor::Red);
-            MatC->SetScalarParameterValue(TEXT("EmissiveIntensity"), 6.0f);
-            Cyl->SetMaterial(0, MatC);
-            Cyl->AttachToComponent(GetRootComponent(), FAttachmentTransformRules::KeepWorldTransform);
-            Cyl->RegisterComponent();
-            OverlapMarkers.Add(Cyl);
-        }
-
-        if (!bHaveFirst)
-        {
-            FirstPos = O.LigandPosition;
-            bHaveFirst = true;
-        }
-    }
-
-    // Center camera on first overlap (optional)
-    if (bHaveFirst && PC)
-    {
-        PC->SetViewTarget(this);
-    }
-}
- */
 FLinearColor APDBViewer::GetElementColor(const FString &E) const
 {
     // OPTIMIZATION #7: Static result cache to avoid repeated ToUpper() calls
@@ -1906,42 +1891,13 @@ FLinearColor APDBViewer::GetElementColor(const FString &E) const
 
 void APDBViewer::ClearResidueMap()
 {
-    for (auto &P : ResidueMap)
-    {
-        if (!P.Value)
-            continue;
-
-        FResidueInfo* Info = P.Value;
-
-        DestroyMeshComponents(Info->AtomMeshes);
-        DestroyMeshComponents(Info->BondMeshes);
-
-        delete P.Value;
-    }
-    ResidueMap.Empty();
+    ClearInfoMap(ResidueMap, nullptr);
     ChainIDs.Empty();
 }
 
-
 void APDBViewer::ClearLigandMap()
 {
-    for (auto &P : LigandMap)
-    {
-        if (!P.Value)
-            continue;
-
-        FLigandInfo* Info = P.Value;
-
-        DestroyMeshComponents(Info->AtomMeshes);
-        DestroyMeshComponents(Info->BondMeshes);
-
-        // ===== NEW: CLEAR ATOM LIGHTS =====
-        ClearLigandAtomLights(Info);
-        // ==================================
-
-        delete P.Value;
-    }
-    LigandMap.Empty();
+    ClearInfoMap(LigandMap, [this](auto* Info) { ClearLigandAtomLights(Info); });
     // OPTIMIZATION #9: Mark chain cache as dirty
     bLigandChainCacheDirty = true;
 }
@@ -2036,23 +1992,7 @@ TArray<UPDBTreeNode*> APDBViewer::GetWaterNodesForChain(const FString& ChainID)
     LigandMap.GetKeys(Keys);
 
     // Sort by sequence number
-    Keys.Sort([](const FString& A, const FString& B)
-    {
-        int32 U1, U2;
-        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
-            return A < B;
-
-        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
-        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
-
-        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
-        {
-            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
-            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
-            return NumA < NumB;
-        }
-        return A < B;
-    });
+    Keys.Sort(GetLigandKeyComparator());
 
     for (const FString& Key : Keys)
     {
@@ -2089,30 +2029,7 @@ TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
     LigandMap.GetKeys(Keys);
 
     // Sort by name then sequence number
-    Keys.Sort([](const FString& A, const FString& B)
-    {
-        int32 U1, U2;
-        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
-            return A < B;
-
-        // First compare residue names
-        FString NameA = A.Left(U1);
-        FString NameB = B.Left(U2);
-        if (NameA != NameB)
-            return NameA < NameB;
-
-        // Then compare sequence numbers
-        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
-        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
-
-        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
-        {
-            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
-            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
-            return NumA < NumB;
-        }
-        return A < B;
-    });
+    Keys.Sort(GetLigandKeyComparator(true));
 
     for (const FString& Key : Keys)
     {
@@ -2200,6 +2117,25 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
 
     bool bNewVisibility = true;
 
+    // Lambda to toggle residue category
+    auto ToggleResidueCategory = [this, &Node, &bNewVisibility]() {
+        // Determine new visibility
+        for (auto& Pair : ResidueMap) {
+            if (Pair.Value && Pair.Value->Chain == Node->ChainID) {
+                bNewVisibility = !Pair.Value->bIsVisible;
+                break;
+            }
+        }
+        // Apply new visibility
+        for (auto& Pair : ResidueMap) {
+            if (Pair.Value && Pair.Value->Chain == Node->ChainID) {
+                Pair.Value->bIsVisible = bNewVisibility;
+                SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+                SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
+            }
+        }
+    };
+
     // Lambda to toggle ligand category with filter
     auto ToggleLigandCategory = [this, &Node, &bNewVisibility](TFunction<bool(const FString&)> KeyFilter) {
         // Determine new visibility
@@ -2225,24 +2161,8 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
     switch (Node->NodeType)
     {
         case EPDBNodeType::ResiduesCategory:
-        {
-            // Determine new visibility
-            for (auto& Pair : ResidueMap) {
-                if (Pair.Value && Pair.Value->Chain == Node->ChainID) {
-                    bNewVisibility = !Pair.Value->bIsVisible;
-                    break;
-                }
-            }
-            // Apply new visibility
-            for (auto& Pair : ResidueMap) {
-                if (Pair.Value && Pair.Value->Chain == Node->ChainID) {
-                    Pair.Value->bIsVisible = bNewVisibility;
-                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
-                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
-                }
-            }
+            ToggleResidueCategory();
             break;
-        }
 
         case EPDBNodeType::HeteroatomsCategory:
             ToggleLigandCategory([](const FString&) { return true; });  // All ligands
@@ -2517,14 +2437,8 @@ TArray<FString> APDBViewer::GetResidueList() const
         return A.Value < B.Value;
     });
 
-    // Extract just the keys
-    TArray<FString> List;
-    List.Reserve(KeySeqPairs.Num());
-    for (const auto& Pair : KeySeqPairs)
-    {
-        List.Add(Pair.Key);
-    }
-    return List;
+    // Extract just the keys using helper
+    return ExtractKeysFromPairs(KeySeqPairs);
 }
 
 TArray<FString> APDBViewer::GetLigandList() const { return GetResidueList(); }
@@ -2811,20 +2725,9 @@ void APDBViewer::DebugPrintLigandInfo()
 
         if (Info->BondOrders.Num() > 0)
         {
-            int32 Single = 0, Double = 0, Triple = 0, Aromatic = 0;
-            for (int32 Order : Info->BondOrders)
-            {
-                if (Order == 1)
-                    Single++;
-                else if (Order == 2)
-                    Double++;
-                else if (Order == 3)
-                    Triple++;
-                else
-                    Aromatic++;
-            }
+            TArray<int32> BondCounts = CountBondOrdersByType(Info->BondOrders);
             UE_LOG(LogTemp, Log, TEXT("  Bond Types: Single=%d, Double=%d, Triple=%d, Other=%d"),
-                   Single, Double, Triple, Aromatic);
+                   BondCounts[0], BondCounts[1], BondCounts[2], BondCounts[3]);
         }
     }
 
@@ -2862,21 +2765,7 @@ void APDBViewer::AddExplicitHydrogens()
     if (bHydrogensVisible)
         return;
 
-    // OPTIMIZED: Use consolidated helpers for hydrogen visibility
-    // OPTIMIZATION #12: Use const reference (not modifying map entries)
-    for (const auto &Pair : LigandMap)
-    {
-        if (Pair.Value)
-            UpdateLigandHydrogenVisibility(Pair.Value, true);
-    }
-
-    // OPTIMIZATION #12: Use const reference (not modifying map entries)
-    for (const auto &Pair : ResidueMap)
-    {
-        if (Pair.Value)
-            UpdateResidueHydrogenVisibility(Pair.Value, true);
-    }
-
+    UpdateAllHydrogenVisibility(true);
     bHydrogensVisible = true;
     UE_LOG(LogTemp, Log, TEXT("Showed %d hydrogens"), GetHydrogenCount());
 }
@@ -2886,21 +2775,7 @@ void APDBViewer::RemoveExplicitHydrogens()
     if (!bHydrogensVisible)
         return;
 
-    // OPTIMIZED: Use consolidated helpers for hydrogen visibility
-    // OPTIMIZATION #12: Use const reference (not modifying map entries)
-    for (const auto &Pair : LigandMap)
-    {
-        if (Pair.Value)
-            UpdateLigandHydrogenVisibility(Pair.Value, false);
-    }
-
-    // OPTIMIZATION #12: Use const reference (not modifying map entries)
-    for (const auto &Pair : ResidueMap)
-    {
-        if (Pair.Value)
-            UpdateResidueHydrogenVisibility(Pair.Value, false);
-    }
-
+    UpdateAllHydrogenVisibility(false);
     bHydrogensVisible = false;
     UE_LOG(LogTemp, Log, TEXT("Hid %d hydrogens"), GetHydrogenCount());
 }
@@ -2914,23 +2789,17 @@ int32 APDBViewer::AddHydrogensToLigand(FLigandInfo *LigInfo) { return 0; } // De
 
 int32 APDBViewer::GetHydrogenCount() const
 {
-    int32 Count = 0;
+    auto CountHydrogens = [](const auto& InfoMap) {
+        int32 Count = 0;
+        for (const auto& Pair : InfoMap)
+            if (Pair.Value)
+                for (const FString& Elem : Pair.Value->AtomElements)
+                    if (Elem == TEXT("H"))
+                        Count++;
+        return Count;
+    };
 
-    // Count ligand hydrogens
-    for (const auto &Pair : LigandMap)
-        if (Pair.Value)
-            for (const FString &Elem : Pair.Value->AtomElements)
-                if (Elem == TEXT("H"))
-                    Count++;
-
-    // Count residue hydrogens
-    for (const auto &Pair : ResidueMap)
-        if (Pair.Value)
-            for (const FString &Elem : Pair.Value->AtomElements)
-                if (Elem == TEXT("H"))
-                    Count++;
-
-    return Count;
+    return CountHydrogens(LigandMap) + CountHydrogens(ResidueMap);
 }
 
 // Update ClearCurrentStructure - remove ClearHydrogens() call:

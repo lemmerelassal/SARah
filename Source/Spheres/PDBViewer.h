@@ -570,6 +570,23 @@ protected:
     // Helper: Get filtered tree nodes for chain
     TArray<UPDBTreeNode*> GetFilteredNodesForChain(const FString& ChainID, TFunction<bool(const FString&)> KeyFilter, const FString& CategoryPrefix);
 
+    // Helper: Get ligand key sorting comparator (format: NAME_SEQ_CHAIN)
+    static TFunction<bool(const FString&, const FString&)> GetLigandKeyComparator(bool bSortByName = false);
+
+    // Helper: Update all hydrogen visibility (both ligands and residues)
+    void UpdateAllHydrogenVisibility(bool bVisible);
+
+    // Helper: Generic info map cleanup
+    template<typename TMap, typename TPreDelete>
+    void ClearInfoMap(TMap& InfoMap, TPreDelete PreDeleteFunc);
+
+    // Helper: Count bond orders by type (returns array: [Single, Double, Triple, Other])
+    static TArray<int32> CountBondOrdersByType(const TArray<int32>& BondOrders);
+
+    // Helper: Extract keys from array of TPairs
+    template<typename K, typename V>
+    static TArray<K> ExtractKeysFromPairs(const TArray<TPair<K, V>>& Pairs);
+
     void DrawSphere(float X, float Y, float Z, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     void DrawSphere(const FVector& Position, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     void DrawBond(const FVector& Start, const FVector& End, int32 Order, const FString& Element1, const FString& Element2, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
