@@ -539,7 +539,39 @@ protected:
     // OPTIMIZATION #19: Material instance pooling helper
     UMaterialInstanceDynamic* GetOrCreateMaterial(const FLinearColor& Color);
 
+    // ===== CODE REDUCTION HELPERS =====
+
+    // Helper: Destroy all mesh components in array
+    static void DestroyMeshComponents(TArray<UStaticMeshComponent*>& Meshes);
+
+    // Helper: Safe pointer dereference
+    template<typename T>
+    static inline T* SafeDereference(T** PtrPtr) { return (PtrPtr && *PtrPtr) ? *PtrPtr : nullptr; }
+
+    // Helper: Check if mesh is valid
+    template<typename T>
+    static inline bool IsValidMesh(T* Mesh) { return Mesh && IsValid(Mesh); }
+
+    // Helper: Find atom index by name
+    static int32 FindAtomIndexByName(const TArray<FString>& Names, const FString& Name);
+
+    // ===== LAMBDA-BASED CODE REDUCTION HELPERS =====
+
+    // Helper: Update mesh visibility (replaces dual atom/bond loops)
+    static void SetMeshArrayVisibility(TArray<UStaticMeshComponent*>& Meshes, bool bVisible, bool bPropagateToChildren = false);
+
+    // Helper: Update hydrogen visibility for any structure type (template)
+    template<typename TInfo>
+    void UpdateStructureHydrogenVisibility(TInfo* Info, bool bVisible);
+
+    // Helper: Apply action to all valid lights in ligand map
+    void ForEachValidLigandLight(TFunction<void(UPointLightComponent*)> Action);
+
+    // Helper: Get filtered tree nodes for chain
+    TArray<UPDBTreeNode*> GetFilteredNodesForChain(const FString& ChainID, TFunction<bool(const FString&)> KeyFilter, const FString& CategoryPrefix);
+
     void DrawSphere(float X, float Y, float Z, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
+    void DrawSphere(const FVector& Position, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     void DrawBond(const FVector& Start, const FVector& End, int32 Order, const FString& Element1, const FString& Element2, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     FLinearColor GetElementColor(const FString& Element) const;
     void ClearResidueMap();

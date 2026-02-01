@@ -36,18 +36,9 @@ namespace PDB
 // ===== OPTIMIZATION: String Parsing Helpers =====
 FString APDBViewer::GetChainFromLigandKey(const FString& Key)
 {
-    int32 FirstUnderscore = INDEX_NONE;
-    int32 SecondUnderscore = INDEX_NONE;
-
-    if (Key.FindChar('_', FirstUnderscore))
-    {
-        SecondUnderscore = Key.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, FirstUnderscore + 1);
-        if (SecondUnderscore != INDEX_NONE && SecondUnderscore + 1 < Key.Len())
-        {
-            return Key.RightChop(SecondUnderscore + 1);
-        }
-    }
-    return TEXT("");
+    FString Name, Seq, Chain;
+    ParseLigandKey(Key, Name, Seq, Chain);
+    return Chain;
 }
 
 void APDBViewer::ParseLigandKey(const FString& Key, FString& OutName, FString& OutSeq, FString& OutChain)
@@ -139,6 +130,133 @@ UMaterialInstanceDynamic* APDBViewer::GetOrCreateMaterial(const FLinearColor& Co
     }
 
     return NewMat;
+}
+
+// ===== CODE REDUCTION HELPERS =====
+
+void APDBViewer::DestroyMeshComponents(TArray<UStaticMeshComponent*>& Meshes)
+{
+    for (auto* M : Meshes)
+    {
+        if (IsValidMesh(M))
+            M->DestroyComponent();
+    }
+    Meshes.Empty();
+}
+
+int32 APDBViewer::FindAtomIndexByName(const TArray<FString>& Names, const FString& Name)
+{
+    return Names.IndexOfByKey(Name);
+}
+
+// ===== LAMBDA-BASED CODE REDUCTION HELPERS =====
+
+void APDBViewer::SetMeshArrayVisibility(TArray<UStaticMeshComponent*>& Meshes, bool bVisible, bool bPropagateToChildren)
+{
+    for (auto* M : Meshes)
+    {
+        if (M)
+            M->SetVisibility(bVisible, bPropagateToChildren);
+    }
+}
+
+template<typename TInfo>
+void APDBViewer::UpdateStructureHydrogenVisibility(TInfo* Info, bool bVisible)
+{
+    if (!Info)
+        return;
+
+    // Lambda to check if atom is hydrogen
+    auto IsHydrogen = [&](int32 i) {
+        return Info->AtomElements.IsValidIndex(i) &&
+               Info->AtomElements[i] == TEXT("H") &&
+               Info->AtomMeshes.IsValidIndex(i);
+    };
+
+    // Lambda to check if bond involves hydrogen
+    auto HasHydrogenBond = [&](int32 i) {
+        if (!Info->BondPairs.IsValidIndex(i))
+            return false;
+        int32 A1 = Info->BondPairs[i].Key;
+        int32 A2 = Info->BondPairs[i].Value;
+        return (Info->AtomElements.IsValidIndex(A1) && Info->AtomElements[A1] == TEXT("H")) ||
+               (Info->AtomElements.IsValidIndex(A2) && Info->AtomElements[A2] == TEXT("H"));
+    };
+
+    // Update hydrogen atom visibility
+    for (int32 i = 0; i < Info->AtomElements.Num(); ++i)
+    {
+        if (IsHydrogen(i))
+            Info->AtomMeshes[i]->SetVisibility(bVisible && Info->bIsVisible);
+    }
+
+    // Update bonds involving hydrogen
+    for (int32 i = 0; i < Info->BondPairs.Num(); ++i)
+    {
+        if (HasHydrogenBond(i) && Info->BondMeshes.IsValidIndex(i))
+            Info->BondMeshes[i]->SetVisibility(bVisible && Info->bIsVisible);
+    }
+}
+
+void APDBViewer::ForEachValidLigandLight(TFunction<void(UPointLightComponent*)> Action)
+{
+    for (auto& Pair : LigandMap)
+    {
+        if (Pair.Value && Pair.Value->bIsVisible)
+        {
+            for (UPointLightComponent* Light : Pair.Value->AtomLights)
+            {
+                if (Light && IsValid(Light))
+                    Action(Light);
+            }
+        }
+    }
+}
+
+TArray<UPDBTreeNode*> APDBViewer::GetFilteredNodesForChain(const FString& ChainID, TFunction<bool(const FString&)> KeyFilter, const FString& CategoryPrefix)
+{
+    TArray<UPDBTreeNode*> Nodes;
+    TArray<FString> Keys;
+    LigandMap.GetKeys(Keys);
+
+    // Sort by sequence number using lambda
+    Keys.Sort([](const FString& A, const FString& B) {
+        int32 U1, U2;
+        if (!A.FindChar('_', U1) || !B.FindChar('_', U2))
+            return A < B;
+
+        int32 U3 = A.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U1 + 1);
+        int32 U4 = B.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, U2 + 1);
+
+        if (U3 != INDEX_NONE && U4 != INDEX_NONE)
+        {
+            int32 NumA = FCString::Atoi(*A.Mid(U1 + 1, U3 - U1 - 1));
+            int32 NumB = FCString::Atoi(*B.Mid(U2 + 1, U4 - U2 - 1));
+            return NumA < NumB;
+        }
+        return A < B;
+    });
+
+    for (const FString& Key : Keys)
+    {
+        if (!KeyFilter(Key))
+            continue;
+
+        const auto* Info = SafeDereference(LigandMap.Find(Key));
+        if (!Info)
+            continue;
+
+        FString KeyChain = GetChainFromLigandKey(Key);
+        if (KeyChain != ChainID)
+            continue;
+
+        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
+        Node->Initialize(CategoryPrefix + Info->LigandName, Key, false, ChainID);
+        Node->bIsVisible = Info->bIsVisible;
+        Nodes.Add(Node);
+    }
+
+    return Nodes;
 }
 
 APDBViewer::APDBViewer()
@@ -323,18 +441,8 @@ void APDBViewer::ApplyLODLevel(int32 NewLODLevel)
 
         // For ligands, show at full detail at LOD 0 and 1, hide at LOD 2+
         bool bShowLigand = (NewLODLevel <= 1);
-
-        for (UStaticMeshComponent* AtomMesh : LigInfo->AtomMeshes)
-        {
-            if (AtomMesh)
-                AtomMesh->SetVisibility(bShowLigand, false);
-        }
-
-        for (UStaticMeshComponent* BondMesh : LigInfo->BondMeshes)
-        {
-            if (BondMesh)
-                BondMesh->SetVisibility(bShowLigand, false);
-        }
+        SetMeshArrayVisibility(LigInfo->AtomMeshes, bShowLigand, false);
+        SetMeshArrayVisibility(LigInfo->BondMeshes, bShowLigand, false);
     }
 }
 
@@ -916,26 +1024,10 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
                 continue; // Skip if not consecutive
 
             // Find C atom (carbonyl carbon) in current residue
-            int32 CIndex = -1;
-            for (int32 j = 0; j < CurrentRes->AtomNames.Num(); ++j)
-            {
-                if (CurrentRes->AtomNames[j] == TEXT("C"))
-                {
-                    CIndex = j;
-                    break;
-                }
-            }
+            int32 CIndex = FindAtomIndexByName(CurrentRes->AtomNames, TEXT("C"));
 
             // Find N atom in next residue
-            int32 NIndex = -1;
-            for (int32 j = 0; j < NextRes->AtomNames.Num(); ++j)
-            {
-                if (NextRes->AtomNames[j] == TEXT("N"))
-                {
-                    NIndex = j;
-                    break;
-                }
-            }
+            int32 NIndex = FindAtomIndexByName(NextRes->AtomNames, TEXT("N"));
 
             // Create peptide bond if both atoms found
             if (CIndex != -1 && NIndex != -1)
@@ -1018,8 +1110,7 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
 
                 // Apply scaling only when drawing
                 FVector ScaledHPos = HPair.Key * PDB::SCALE;
-                DrawSphere(ScaledHPos.X, ScaledHPos.Y, ScaledHPos.Z, FLinearColor::White,
-                           GetRootComponent(), LigInfo->AtomMeshes);
+                DrawSphere(ScaledHPos, FLinearColor::White, GetRootComponent(), LigInfo->AtomMeshes);
                 LigInfo->AtomMeshes.Last()->SetWorldScale3D(FVector(0.3f));
                 LigInfo->AtomMeshes.Last()->SetVisibility(bHydrogensVisible && LigInfo->bIsVisible);
 
@@ -1169,8 +1260,7 @@ void APDBViewer::ParseSDF(const FString &Content)
         {
             FLinearColor Color = GetElementColor(Info->AtomElements[i]);
             FVector ScaledPos = Info->AtomPositions[i] * PDB::SCALE;
-            DrawSphere(ScaledPos.X, ScaledPos.Y, ScaledPos.Z,
-                       Color, GetRootComponent(), Info->AtomMeshes);
+            DrawSphere(ScaledPos, Color, GetRootComponent(), Info->AtomMeshes);
         }
 
         // Draw bonds with SCALED positions
@@ -1184,12 +1274,8 @@ void APDBViewer::ParseSDF(const FString &Content)
                      Info->AtomElements[A1], Info->AtomElements[A2], GetRootComponent(), Info->BondMeshes);
         }
 
-        for (auto *Mesh : Info->AtomMeshes)
-            if (Mesh)
-                Mesh->SetVisibility(Info->bIsVisible);
-        for (auto *Mesh : Info->BondMeshes)
-            if (Mesh)
-                Mesh->SetVisibility(Info->bIsVisible);
+        SetMeshArrayVisibility(Info->AtomMeshes, Info->bIsVisible);
+        SetMeshArrayVisibility(Info->BondMeshes, Info->bIsVisible);
 
         // OPTIMIZATION #9: Key is just MoleculeName
         LigandMap.Add(MoleculeName, Info);
@@ -1255,7 +1341,7 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
 
                 // Apply scaling only when rendering
                 FVector ScaledPos = A.Value * PDB::SCALE;
-                DrawSphere(ScaledPos.X, ScaledPos.Y, ScaledPos.Z, GetElementColor(Element), GetRootComponent(), LigInfo->AtomMeshes);
+                DrawSphere(ScaledPos, GetElementColor(Element), GetRootComponent(), LigInfo->AtomMeshes);
             }
 
             for (auto *Mesh : LigInfo->AtomMeshes)
@@ -1626,6 +1712,11 @@ void APDBViewer::DrawSphere(float X, float Y, float Z, const FLinearColor &Col, 
     AllAtomMeshes.Add(Sph);
 }
 
+void APDBViewer::DrawSphere(const FVector& Position, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray)
+{
+    DrawSphere(Position.X, Position.Y, Position.Z, Color, Parent, OutArray);
+}
+
 void APDBViewer::DrawBond(const FVector &S, const FVector &E, int32 Ord, const FString &Element1, const FString &Element2, USceneComponent *Par, TArray<UStaticMeshComponent *> &Out)
 {
     if (!CylinderMeshAsset || !SphereMaterialAsset || !Par)
@@ -1819,22 +1910,12 @@ void APDBViewer::ClearResidueMap()
     {
         if (!P.Value)
             continue;
-        
+
         FResidueInfo* Info = P.Value;
-        
-        // Clear existing mesh components
-        for (auto* M : Info->AtomMeshes)
-        {
-            if (M && IsValid(M))
-                M->DestroyComponent();
-        }
-        
-        for (auto* M : Info->BondMeshes)
-        {
-            if (M && IsValid(M))
-                M->DestroyComponent();
-        }
-        
+
+        DestroyMeshComponents(Info->AtomMeshes);
+        DestroyMeshComponents(Info->BondMeshes);
+
         delete P.Value;
     }
     ResidueMap.Empty();
@@ -1848,26 +1929,16 @@ void APDBViewer::ClearLigandMap()
     {
         if (!P.Value)
             continue;
-        
+
         FLigandInfo* Info = P.Value;
-        
-        // Clear existing mesh components
-        for (auto* M : Info->AtomMeshes)
-        {
-            if (M && IsValid(M))
-                M->DestroyComponent();
-        }
-        
-        for (auto* M : Info->BondMeshes)
-        {
-            if (M && IsValid(M))
-                M->DestroyComponent();
-        }
-        
+
+        DestroyMeshComponents(Info->AtomMeshes);
+        DestroyMeshComponents(Info->BondMeshes);
+
         // ===== NEW: CLEAR ATOM LIGHTS =====
         ClearLigandAtomLights(Info);
         // ==================================
-        
+
         delete P.Value;
     }
     LigandMap.Empty();
@@ -1877,10 +1948,9 @@ void APDBViewer::ClearLigandMap()
 
 void APDBViewer::ToggleResidueVisibility(const FString &Key)
 {
-    auto **InfoPtr = ResidueMap.Find(Key);
-    if (!InfoPtr || !*InfoPtr)
+    auto *Info = SafeDereference(ResidueMap.Find(Key));
+    if (!Info)
         return;
-    auto *Info = *InfoPtr;
     Info->bIsVisible = !Info->bIsVisible;
     // OPTIMIZATION #16: Use batched visibility updates
     SetMeshVisibilityBatched(Info->AtomMeshes, Info->bIsVisible);
@@ -1990,11 +2060,9 @@ TArray<UPDBTreeNode*> APDBViewer::GetWaterNodesForChain(const FString& ChainID)
         if (!IsWaterKey(Key))
             continue;
 
-        const auto* InfoPtr = LigandMap.Find(Key);
-        if (!InfoPtr || !*InfoPtr)
+        const auto* Info = SafeDereference(LigandMap.Find(Key));
+        if (!Info)
             continue;
-
-        const FLigandInfo* Info = *InfoPtr;
         
         // Extract chain from key (format: "HOH_101_A") - OPTIMIZED
         FString KeyChain = GetChainFromLigandKey(Key);
@@ -2052,11 +2120,9 @@ TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
         if (IsWaterKey(Key))
             continue;
 
-        const auto* InfoPtr = LigandMap.Find(Key);
-        if (!InfoPtr || !*InfoPtr)
+        const auto* Info = SafeDereference(LigandMap.Find(Key));
+        if (!Info)
             continue;
-
-        const FLigandInfo* Info = *InfoPtr;
         
         // Extract chain from key (format: "ATP_501_A") - OPTIMIZED
         FString KeyChain = GetChainFromLigandKey(Key);
@@ -2131,144 +2197,69 @@ void APDBViewer::ToggleCategoryVisibility(UPDBTreeNode* Node)
 {
     if (!Node)
         return;
-    
-    // Determine new visibility by checking first item in category
+
     bool bNewVisibility = true;
-    
+
+    // Lambda to toggle ligand category with filter
+    auto ToggleLigandCategory = [this, &Node, &bNewVisibility](TFunction<bool(const FString&)> KeyFilter) {
+        // Determine new visibility
+        for (auto& Pair : LigandMap) {
+            if (!KeyFilter(Pair.Key)) continue;
+            if (GetChainFromLigandKey(Pair.Key) == Node->ChainID && Pair.Value) {
+                bNewVisibility = !Pair.Value->bIsVisible;
+                break;
+            }
+        }
+        // Apply new visibility
+        for (auto& Pair : LigandMap) {
+            if (!KeyFilter(Pair.Key)) continue;
+            if (GetChainFromLigandKey(Pair.Key) == Node->ChainID && Pair.Value) {
+                Pair.Value->bIsVisible = bNewVisibility;
+                SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
+                SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
+                UpdateLigandAtomLights(Pair.Value);
+            }
+        }
+    };
+
     switch (Node->NodeType)
     {
         case EPDBNodeType::ResiduesCategory:
         {
-            // Toggle all residues in this chain
-            for (auto& Pair : ResidueMap)
-            {
-                if (Pair.Value && Pair.Value->Chain == Node->ChainID)
-                {
+            // Determine new visibility
+            for (auto& Pair : ResidueMap) {
+                if (Pair.Value && Pair.Value->Chain == Node->ChainID) {
                     bNewVisibility = !Pair.Value->bIsVisible;
                     break;
                 }
             }
-            
-            for (auto& Pair : ResidueMap)
-            {
-                if (Pair.Value && Pair.Value->Chain == Node->ChainID)
-                {
+            // Apply new visibility
+            for (auto& Pair : ResidueMap) {
+                if (Pair.Value && Pair.Value->Chain == Node->ChainID) {
                     Pair.Value->bIsVisible = bNewVisibility;
-                    // OPTIMIZATION #16: Use batched visibility updates
                     SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
                     SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
                 }
             }
             break;
         }
-        
+
         case EPDBNodeType::HeteroatomsCategory:
-        {
-            // Toggle all heteroatoms (water + ligands) in this chain
-            for (auto& Pair : LigandMap)
-            {
-                // OPTIMIZED: Use helper instead of ParseIntoArray
-                FString LigandChain = GetChainFromLigandKey(Pair.Key);
-                if (LigandChain == Node->ChainID && Pair.Value)
-                {
-                    bNewVisibility = !Pair.Value->bIsVisible;
-                    break;
-                }
-            }
-            
-            for (auto& Pair : LigandMap)
-            {
-                // OPTIMIZED: Use helper instead of ParseIntoArray
-                FString LigandChain = GetChainFromLigandKey(Pair.Key);
-                if (LigandChain == Node->ChainID && Pair.Value)
-                {
-                    Pair.Value->bIsVisible = bNewVisibility;
-                    // OPTIMIZATION #16: Use batched visibility updates
-                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
-                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
-                    UpdateLigandAtomLights(Pair.Value);
-                }
-            }
+            ToggleLigandCategory([](const FString&) { return true; });  // All ligands
             break;
-        }
-        
+
         case EPDBNodeType::WaterCategory:
-        {
-            // Toggle all water molecules in this chain
-            for (auto& Pair : LigandMap)
-            {
-                if (!IsWaterKey(Pair.Key))
-                    continue;
-                    
-                // OPTIMIZED: Use helper instead of ParseIntoArray
-                FString LigandChain = GetChainFromLigandKey(Pair.Key);
-                if (LigandChain == Node->ChainID && Pair.Value)
-                {
-                    bNewVisibility = !Pair.Value->bIsVisible;
-                    break;
-                }
-            }
-            
-            for (auto& Pair : LigandMap)
-            {
-                if (!IsWaterKey(Pair.Key))
-                    continue;
-                    
-                // OPTIMIZED: Use helper instead of ParseIntoArray
-                FString LigandChain = GetChainFromLigandKey(Pair.Key);
-                if (LigandChain == Node->ChainID && Pair.Value)
-                {
-                    Pair.Value->bIsVisible = bNewVisibility;
-                    // OPTIMIZATION #16: Use batched visibility updates
-                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
-                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
-                    UpdateLigandAtomLights(Pair.Value);
-                }
-            }
+            ToggleLigandCategory([this](const FString& K) { return IsWaterKey(K); });
             break;
-        }
-        
+
         case EPDBNodeType::LigandsCategory:
-        {
-            // Toggle all ligands (non-water) in this chain
-            for (auto& Pair : LigandMap)
-            {
-                if (IsWaterKey(Pair.Key))
-                    continue;
-                    
-                // OPTIMIZED: Use helper instead of ParseIntoArray
-                FString LigandChain = GetChainFromLigandKey(Pair.Key);
-                if (LigandChain == Node->ChainID && Pair.Value)
-                {
-                    bNewVisibility = !Pair.Value->bIsVisible;
-                    break;
-                }
-            }
-            
-            for (auto& Pair : LigandMap)
-            {
-                if (IsWaterKey(Pair.Key))
-                    continue;
-                    
-                // OPTIMIZED: Use helper instead of ParseIntoArray
-                FString LigandChain = GetChainFromLigandKey(Pair.Key);
-                if (LigandChain == Node->ChainID && Pair.Value)
-                {
-                    Pair.Value->bIsVisible = bNewVisibility;
-                    // OPTIMIZATION #16: Use batched visibility updates
-                    SetMeshVisibilityBatched(Pair.Value->AtomMeshes, bNewVisibility);
-                    SetMeshVisibilityBatched(Pair.Value->BondMeshes, bNewVisibility);
-                    UpdateLigandAtomLights(Pair.Value);
-                }
-            }
+            ToggleLigandCategory([this](const FString& K) { return !IsWaterKey(K); });
             break;
-        }
-        
+
         default:
             break;
     }
-    
-    // Update the node's visibility state
+
     Node->bIsVisible = bNewVisibility;
 }
 
@@ -2686,11 +2677,9 @@ TArray<UPDBMoleculeNode *> APDBViewer::GetMoleculeNodes()
 
     for (const FString &Key : Keys)
     {
-        const auto *InfoPtr = LigandMap.Find(Key);
-        if (!InfoPtr || !*InfoPtr)
+        const auto *Info = SafeDereference(LigandMap.Find(Key));
+        if (!Info)
             continue;
-
-        const FLigandInfo *Info = *InfoPtr;
 
         UPDBMoleculeNode *Node = NewObject<UPDBMoleculeNode>(this);
         Node->Initialize(
@@ -2726,11 +2715,9 @@ void APDBViewer::PopulateMoleculeListView(UListView *ListView)
 
 void APDBViewer::ToggleMoleculeVisibility(const FString &MoleculeKey)
 {
-    auto **InfoPtr = LigandMap.Find(MoleculeKey);
-    if (!InfoPtr || !*InfoPtr)
+    auto *Info = SafeDereference(LigandMap.Find(MoleculeKey));
+    if (!Info)
         return;
-
-    auto *Info = *InfoPtr;
     bool bNewVisible = !Info->bIsVisible;
 
     if (bNewVisible)
@@ -2849,54 +2836,12 @@ void APDBViewer::DebugPrintLigandInfo()
 // ===== OPTIMIZATION: Consolidated Hydrogen Visibility Helpers =====
 void APDBViewer::UpdateLigandHydrogenVisibility(FLigandInfo* LigInfo, bool bVisible)
 {
-    if (!LigInfo)
-        return;
-
-    // Update visibility for hydrogen atoms
-    for (int32 i = 0; i < LigInfo->AtomElements.Num(); ++i)
-    {
-        if (LigInfo->AtomElements[i] == TEXT("H") && LigInfo->AtomMeshes.IsValidIndex(i))
-            LigInfo->AtomMeshes[i]->SetVisibility(bVisible && LigInfo->bIsVisible);
-    }
-
-    // Update visibility for bonds involving hydrogens
-    for (int32 i = 0; i < LigInfo->BondPairs.Num(); ++i)
-    {
-        int32 A1 = LigInfo->BondPairs[i].Key;
-        int32 A2 = LigInfo->BondPairs[i].Value;
-
-        bool bHasH = (LigInfo->AtomElements.IsValidIndex(A1) && LigInfo->AtomElements[A1] == TEXT("H")) ||
-                     (LigInfo->AtomElements.IsValidIndex(A2) && LigInfo->AtomElements[A2] == TEXT("H"));
-
-        if (bHasH && LigInfo->BondMeshes.IsValidIndex(i))
-            LigInfo->BondMeshes[i]->SetVisibility(bVisible && LigInfo->bIsVisible);
-    }
+    UpdateStructureHydrogenVisibility(LigInfo, bVisible);
 }
 
 void APDBViewer::UpdateResidueHydrogenVisibility(FResidueInfo* ResInfo, bool bVisible)
 {
-    if (!ResInfo)
-        return;
-
-    // Update visibility for hydrogen atoms
-    for (int32 i = 0; i < ResInfo->AtomElements.Num(); ++i)
-    {
-        if (ResInfo->AtomElements[i] == TEXT("H") && ResInfo->AtomMeshes.IsValidIndex(i))
-            ResInfo->AtomMeshes[i]->SetVisibility(bVisible && ResInfo->bIsVisible);
-    }
-
-    // Update visibility for bonds involving hydrogens
-    for (int32 i = 0; i < ResInfo->BondPairs.Num(); ++i)
-    {
-        int32 A1 = ResInfo->BondPairs[i].Key;
-        int32 A2 = ResInfo->BondPairs[i].Value;
-
-        bool bHasH = (ResInfo->AtomElements.IsValidIndex(A1) && ResInfo->AtomElements[A1] == TEXT("H")) ||
-                     (ResInfo->AtomElements.IsValidIndex(A2) && ResInfo->AtomElements[A2] == TEXT("H"));
-
-        if (bHasH && ResInfo->BondMeshes.IsValidIndex(i))
-            ResInfo->BondMeshes[i]->SetVisibility(bVisible && ResInfo->bIsVisible);
-    }
+    UpdateStructureHydrogenVisibility(ResInfo, bVisible);
 }
 
 // OPTIMIZATION #16: Batched visibility update helper
@@ -3005,21 +2950,12 @@ void APDBViewer::ClearCurrentStructure()
     CurrentLODLevel = 0;
 
     // Clear interaction data and meshes
-    for (auto *M : InteractionMeshes)
-        if (M && IsValid(M))
-            M->DestroyComponent();
-    InteractionMeshes.Empty();
+    DestroyMeshComponents(InteractionMeshes);
     DetectedInteractions.Empty();
 
     // Clear general atom/bond meshes
-    for (auto *M : AllAtomMeshes)
-        if (M && IsValid(M))
-            M->DestroyComponent();
-    for (auto *M : AllBondMeshes)
-        if (M && IsValid(M))
-            M->DestroyComponent();
-    AllAtomMeshes.Empty();
-    AllBondMeshes.Empty();
+    DestroyMeshComponents(AllAtomMeshes);
+    DestroyMeshComponents(AllBondMeshes);
 }
 // ===== LIGAND ATOM LIGHTING IMPLEMENTATION =====
 
@@ -3140,24 +3076,12 @@ void APDBViewer::SetLigandAtomLightIntensity(float Intensity)
 {
     LigandAtomLightIntensity = Intensity;
 
-    // OPTIMIZED: Early exit if no ligands
     if (LigandMap.Num() == 0)
         return;
 
-    // OPTIMIZED: Only update lights for visible ligands
-    for (auto& Pair : LigandMap)
-    {
-        if (Pair.Value && Pair.Value->bIsVisible)
-        {
-            for (UPointLightComponent* Light : Pair.Value->AtomLights)
-            {
-                if (Light && IsValid(Light))
-                {
-                    Light->SetIntensity(Intensity);
-                }
-            }
-        }
-    }
+    ForEachValidLigandLight([Intensity](UPointLightComponent* Light) {
+        Light->SetIntensity(Intensity);
+    });
 
     UE_LOG(LogTemp, Log, TEXT("Set ligand atom light intensity to %.1f"), Intensity);
 }
@@ -3166,24 +3090,12 @@ void APDBViewer::SetLigandAtomLightRadius(float Radius)
 {
     LigandAtomLightRadius = Radius;
 
-    // OPTIMIZED: Early exit if no ligands
     if (LigandMap.Num() == 0)
         return;
 
-    // OPTIMIZED: Only update lights for visible ligands
-    for (auto& Pair : LigandMap)
-    {
-        if (Pair.Value && Pair.Value->bIsVisible)
-        {
-            for (UPointLightComponent* Light : Pair.Value->AtomLights)
-            {
-                if (Light && IsValid(Light))
-                {
-                    Light->SetAttenuationRadius(Radius);
-                }
-            }
-        }
-    }
+    ForEachValidLigandLight([Radius](UPointLightComponent* Light) {
+        Light->SetAttenuationRadius(Radius);
+    });
 
     UE_LOG(LogTemp, Log, TEXT("Set ligand atom light radius to %.1f"), Radius);
 }
