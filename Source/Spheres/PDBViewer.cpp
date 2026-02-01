@@ -460,12 +460,6 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
                          GetRootComponent(), ResInfo->BondMeshes);
             }
         }
-
-        // After bonds are added, generate hydrogens
-        if (bAutoGenerateHydrogens && ResInfo->BondPairs.Num() > 0)
-        {
-            GenerateHydrogensForResidue(ResInfo);
-        }
     }
 
     // Apply to ligands (HETATM records)
@@ -529,59 +523,6 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
                 {
                     LigInfo->BondMeshes.Last()->SetVisibility(LigInfo->bIsVisible);
                 }
-            }
-        }
-
-        // After bonds are added, generate hydrogens for ligands too!
-        if (bAutoGenerateHydrogens && LigInfo->BondPairs.Num() > 0)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("Generating hydrogens for ligand: %s"), *LigInfo->LigandName);
-
-            // Skip single atoms (water, ions)
-            if (LigInfo->AtomPositions.Num() <= 1)
-            {
-                UE_LOG(LogTemp, Log, TEXT("Skipping %s (single atom)"), *LigInfo->LigandName);
-                continue;
-            }
-
-            // Check if hydrogens already exist
-            bool bHasHydrogens = LigInfo->AtomElements.Contains(TEXT("H"));
-            if (bHasHydrogens)
-            {
-                UE_LOG(LogTemp, Log, TEXT("Ligand %s already has hydrogens"), *LigInfo->LigandName);
-                continue;
-            }
-
-            TArray<TPair<FVector, int32>> Hydrogens = FHydrogenGenerator::GenerateHydrogens(
-                LigInfo->AtomPositions, LigInfo->AtomElements, LigInfo->BondPairs, LigInfo->BondOrders);
-
-            UE_LOG(LogTemp, Warning, TEXT("  Generated %d hydrogens for ligand"), Hydrogens.Num());
-
-            for (const auto &HPair : Hydrogens)
-            {
-                int32 ParentIdx = HPair.Value;
-
-                // Store UNSCALED hydrogen position
-                int32 HIdx = LigInfo->AtomPositions.Add(HPair.Key);
-                LigInfo->AtomElements.Add(TEXT("H"));
-                LigInfo->AtomNames.Add(FString::Printf(TEXT("H%d"), HIdx));
-
-                // Apply scaling only when drawing
-                FVector ScaledHPos = HPair.Key * PDB::SCALE;
-                DrawSphere(ScaledHPos.X, ScaledHPos.Y, ScaledHPos.Z, FLinearColor::White,
-                           GetRootComponent(), LigInfo->AtomMeshes);
-                LigInfo->AtomMeshes.Last()->SetWorldScale3D(FVector(0.3f));
-                LigInfo->AtomMeshes.Last()->SetVisibility(bHydrogensVisible && LigInfo->bIsVisible);
-
-                // Scale both positions for drawing the bond
-                FVector ScaledParent = LigInfo->AtomPositions[ParentIdx] * PDB::SCALE;
-                DrawBond(ScaledParent, ScaledHPos, 1,
-                         LigInfo->AtomElements[ParentIdx], TEXT("H"),
-                         GetRootComponent(), LigInfo->BondMeshes);
-                LigInfo->BondMeshes.Last()->SetVisibility(bHydrogensVisible && LigInfo->bIsVisible);
-
-                LigInfo->BondPairs.Add(TPair<int32, int32>(ParentIdx, HIdx));
-                LigInfo->BondOrders.Add(1);
             }
         }
     }
@@ -668,6 +609,79 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
                        *CurrentRes->ResidueName, *CurrentRes->ResidueSeq,
                        *NextRes->ResidueName, *NextRes->ResidueSeq,
                        FVector::Dist(CPos, NPos));
+            }
+        }
+    }
+
+    // ===== GENERATE HYDROGENS AFTER ALL BONDS ARE CREATED =====
+    if (bAutoGenerateHydrogens)
+    {
+        UE_LOG(LogTemp, Log, TEXT("Generating hydrogens for all residues (after peptide bonds)"));
+
+        // Generate hydrogens for residues
+        for (auto& Pair : ResidueMap)
+        {
+            FResidueInfo* ResInfo = Pair.Value;
+            if (ResInfo && ResInfo->BondPairs.Num() > 0)
+            {
+                GenerateHydrogensForResidue(ResInfo);
+            }
+        }
+
+        // Generate hydrogens for ligands
+        for (auto& Pair : LigandMap)
+        {
+            FLigandInfo* LigInfo = Pair.Value;
+            if (!LigInfo || LigInfo->BondPairs.Num() == 0)
+                continue;
+
+            UE_LOG(LogTemp, Warning, TEXT("Generating hydrogens for ligand: %s"), *LigInfo->LigandName);
+
+            // Skip single atoms (water, ions)
+            if (LigInfo->AtomPositions.Num() <= 1)
+            {
+                UE_LOG(LogTemp, Log, TEXT("Skipping %s (single atom)"), *LigInfo->LigandName);
+                continue;
+            }
+
+            // Check if hydrogens already exist
+            bool bHasHydrogens = LigInfo->AtomElements.Contains(TEXT("H"));
+            if (bHasHydrogens)
+            {
+                UE_LOG(LogTemp, Log, TEXT("Ligand %s already has hydrogens"), *LigInfo->LigandName);
+                continue;
+            }
+
+            TArray<TPair<FVector, int32>> Hydrogens = FHydrogenGenerator::GenerateHydrogens(
+                LigInfo->AtomPositions, LigInfo->AtomElements, LigInfo->BondPairs, LigInfo->BondOrders);
+
+            UE_LOG(LogTemp, Warning, TEXT("  Generated %d hydrogens for ligand"), Hydrogens.Num());
+
+            for (const auto& HPair : Hydrogens)
+            {
+                int32 ParentIdx = HPair.Value;
+
+                // Store UNSCALED hydrogen position
+                int32 HIdx = LigInfo->AtomPositions.Add(HPair.Key);
+                LigInfo->AtomElements.Add(TEXT("H"));
+                LigInfo->AtomNames.Add(FString::Printf(TEXT("H%d"), HIdx));
+
+                // Apply scaling only when drawing
+                FVector ScaledHPos = HPair.Key * PDB::SCALE;
+                DrawSphere(ScaledHPos.X, ScaledHPos.Y, ScaledHPos.Z, FLinearColor::White,
+                           GetRootComponent(), LigInfo->AtomMeshes);
+                LigInfo->AtomMeshes.Last()->SetWorldScale3D(FVector(0.3f));
+                LigInfo->AtomMeshes.Last()->SetVisibility(bHydrogensVisible && LigInfo->bIsVisible);
+
+                // Scale both positions for drawing the bond
+                FVector ScaledParent = LigInfo->AtomPositions[ParentIdx] * PDB::SCALE;
+                DrawBond(ScaledParent, ScaledHPos, 1,
+                         LigInfo->AtomElements[ParentIdx], TEXT("H"),
+                         GetRootComponent(), LigInfo->BondMeshes);
+                LigInfo->BondMeshes.Last()->SetVisibility(bHydrogensVisible && LigInfo->bIsVisible);
+
+                LigInfo->BondPairs.Add(TPair<int32, int32>(ParentIdx, HIdx));
+                LigInfo->BondOrders.Add(1);
             }
         }
     }
@@ -950,11 +964,23 @@ void APDBViewer::GenerateHydrogensForResidue(FResidueInfo *ResInfo)
     {
         int32 ParentIdx = HPair.Value;
 
-        // Skip hydrogens on backbone carbonyl carbon (C) - it bonds to next residue's N
-        if (ResInfo->AtomNames.IsValidIndex(ParentIdx) &&
-            ResInfo->AtomNames[ParentIdx] == TEXT("C"))
+        // Skip hydrogens on backbone atoms that have inter-residue bonds
+        if (ResInfo->AtomNames.IsValidIndex(ParentIdx))
         {
-            continue;
+            FString AtomName = ResInfo->AtomNames[ParentIdx];
+
+            // Skip backbone carbonyl carbon (C) - bonds to next residue's N
+            if (AtomName == TEXT("C"))
+            {
+                continue;
+            }
+
+            // Skip backbone nitrogen (N) - bonds to previous residue's C
+            // It should only have 1 H, which might already be in the structure
+            if (AtomName == TEXT("N"))
+            {
+                continue;
+            }
         }
 
         // Store UNSCALED hydrogen position
