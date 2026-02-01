@@ -12,7 +12,7 @@ public class Spheres : ModuleRules
 		if (Target.Type == TargetType.Editor)
 		{
 			// Add Editor dependencies if you need editor-specific features
-			PrivateDependencyModuleNames.AddRange(new string[] { "LevelEditor", "EditorStyle" });
+			PrivateDependencyModuleNames.AddRange(new string[] { "LevelEditor", "EditorStyle", "MainFrame" });
 		}
 
 		// Public dependencies for the game (and editor)

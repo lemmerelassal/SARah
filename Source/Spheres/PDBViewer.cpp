@@ -1,8 +1,6 @@
 // PDBViewer.cpp – UE 5.6 compatible version with TreeView, SDF support, and Ligand Atom Lighting
 // Modified to include point light components on each ligand atom
 
-#include "Materials/MaterialInstanceDynamic.h"
-
 #include "PDBViewer.h"
 #include "PDBCameraComponent.h"
 #include "HttpModule.h"
@@ -19,7 +17,9 @@
 #include "Misc/Paths.h"
 #include "IDesktopPlatform.h"
 #include "DesktopPlatformModule.h"
+#if WITH_EDITOR
 #include "Interfaces/IMainFrameModule.h"
+#endif
 #include "Components/TreeView.h"
 #include "Components/ListView.h"
 #include "Kismet/GameplayStatics.h"
@@ -76,6 +76,10 @@ void APDBViewer::ParseLigandKey(const FString& Key, FString& OutName, FString& O
 
 void APDBViewer::RebuildLigandChainCache()
 {
+    // OPTIMIZATION #9: Lazy evaluation - only rebuild if dirty
+    if (!bLigandChainCacheDirty)
+        return;
+
     LigandsByChain.Empty();
 
     for (const auto& Pair : LigandMap)
@@ -90,13 +94,57 @@ void APDBViewer::RebuildLigandChainCache()
         }
     }
 
+    bLigandChainCacheDirty = false;
+
     UE_LOG(LogTemp, Log, TEXT("Rebuilt ligand chain cache: %d chains, %d total ligands"),
            LigandsByChain.Num(), LigandMap.Num());
 }
 
+// OPTIMIZATION #15: Shared static cache for trimmed strings
+static TMap<FString, FString> GTrimCache;
+
+const FString& APDBViewer::GetTrimmedString(const FString& Input)
+{
+    const FString* Cached = GTrimCache.Find(Input);
+    if (Cached)
+    {
+        return *Cached;
+    }
+
+    FString Trimmed = Input.TrimStartAndEnd();
+    return GTrimCache.Add(Input, Trimmed);
+}
+
+void APDBViewer::ClearTrimCache()
+{
+    GTrimCache.Empty();
+}
+
+// OPTIMIZATION #19: Material instance pooling - reuse materials for same colors
+UMaterialInstanceDynamic* APDBViewer::GetOrCreateMaterial(const FLinearColor& Color)
+{
+    // Check if we already have a material for this color
+    UMaterialInstanceDynamic** ExistingMat = MaterialPool.Find(Color);
+    if (ExistingMat && *ExistingMat && IsValid(*ExistingMat))
+    {
+        return *ExistingMat;
+    }
+
+    // Create new material instance
+    UMaterialInstanceDynamic* NewMat = UMaterialInstanceDynamic::Create(SphereMaterialAsset, this);
+    if (NewMat)
+    {
+        NewMat->SetVectorParameterValue(TEXT("Color"), Color);
+        MaterialPool.Add(Color, NewMat);
+    }
+
+    return NewMat;
+}
+
 APDBViewer::APDBViewer()
 {
-    PrimaryActorTick.bCanEverTick = false;
+    // OPTIMIZATION #17: Enable ticking for LOD system
+    PrimaryActorTick.bCanEverTick = true;
     RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 
     static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/Engine/BasicShapes/Sphere"));
@@ -120,13 +168,230 @@ void APDBViewer::BeginPlay()
     if (auto *Cam = GetWorld()->SpawnActor<APDBCameraComponent>(APDBCameraComponent::StaticClass(), GetActorLocation(), FRotator::ZeroRotator))
         Cam->SetTargetActor(this);
 
-        
+
     // Show FPS using built-in stat command
     if (GEngine && GEngine->GameViewport)
     {
         GEngine->GameViewport->ConsoleCommand(TEXT("stat fps"));
     }
 }
+
+// ===== OPTIMIZATION #17: LOD SYSTEM IMPLEMENTATION =====
+
+void APDBViewer::Tick(float DeltaTime)
+{
+    Super::Tick(DeltaTime);
+
+    if (!bEnableLODSystem || ForcedLODLevel >= 0)
+        return;
+
+    TimeSinceLastLODCheck += DeltaTime;
+
+    // Only check LOD every LODCheckInterval seconds to avoid performance hit
+    if (TimeSinceLastLODCheck >= LODCheckInterval)
+    {
+        UpdateLODLevel();
+        TimeSinceLastLODCheck = 0.0f;
+    }
+}
+
+void APDBViewer::UpdateLODLevel()
+{
+    // Get camera position from player controller
+    APlayerController* PC = GetWorld()->GetFirstPlayerController();
+    if (!PC || !PC->PlayerCameraManager)
+        return;
+
+    FVector CameraLocation = PC->PlayerCameraManager->GetCameraLocation();
+
+    // Calculate structure center if not cached
+    if (!bStructureCenterCached)
+    {
+        StructureCenter = CalculateStructureCenter();
+        bStructureCenterCached = true;
+    }
+
+    // Calculate distance from camera to structure center
+    float Distance = FVector::Dist(CameraLocation, StructureCenter);
+
+    // Determine LOD level based on distance
+    int32 NewLODLevel = 0;
+    if (Distance > LOD2Distance)
+        NewLODLevel = 3;  // Very far - center of mass only
+    else if (Distance > LOD1Distance)
+        NewLODLevel = 2;  // Far - backbone atoms only
+    else if (Distance > LOD0Distance)
+        NewLODLevel = 1;  // Medium - all atoms, backbone bonds
+    else
+        NewLODLevel = 0;  // Close - full detail
+
+    // Apply LOD if it changed
+    if (NewLODLevel != CurrentLODLevel)
+    {
+        ApplyLODLevel(NewLODLevel);
+        CurrentLODLevel = NewLODLevel;
+    }
+}
+
+FVector APDBViewer::CalculateStructureCenter()
+{
+    FVector SumPosition = FVector::ZeroVector;
+    int32 TotalAtoms = 0;
+
+    // Sum all residue atom positions
+    for (const auto& Pair : ResidueMap)
+    {
+        if (Pair.Value && Pair.Value->bIsVisible)
+        {
+            for (const FVector& Pos : Pair.Value->AtomPositions)
+            {
+                SumPosition += Pos * PDB::SCALE;
+                TotalAtoms++;
+            }
+        }
+    }
+
+    // Sum all ligand atom positions
+    for (const auto& Pair : LigandMap)
+    {
+        if (Pair.Value && Pair.Value->bIsVisible)
+        {
+            for (const FVector& Pos : Pair.Value->AtomPositions)
+            {
+                SumPosition += Pos * PDB::SCALE;
+                TotalAtoms++;
+            }
+        }
+    }
+
+    if (TotalAtoms > 0)
+        return GetActorLocation() + SumPosition / TotalAtoms;
+
+    return GetActorLocation();
+}
+
+void APDBViewer::ApplyLODLevel(int32 NewLODLevel)
+{
+    UE_LOG(LogTemp, Log, TEXT("Applying LOD Level %d (was %d)"), NewLODLevel, CurrentLODLevel);
+
+    // Apply LOD to all residues
+    for (const auto& Pair : ResidueMap)
+    {
+        FResidueInfo* ResInfo = Pair.Value;
+        if (!ResInfo || !ResInfo->bIsVisible)
+            continue;
+
+        // Update atom visibility based on LOD
+        for (int32 i = 0; i < ResInfo->AtomMeshes.Num(); i++)
+        {
+            UStaticMeshComponent* AtomMesh = ResInfo->AtomMeshes[i];
+            if (!AtomMesh)
+                continue;
+
+            const FString& AtomName = (i < ResInfo->AtomNames.Num()) ? ResInfo->AtomNames[i] : TEXT("");
+            bool bShouldBeVisible = ShouldAtomBeVisibleAtLOD(AtomName, NewLODLevel);
+
+            AtomMesh->SetVisibility(bShouldBeVisible, false);
+        }
+
+        // Update bond visibility based on LOD
+        for (int32 i = 0; i < ResInfo->BondMeshes.Num(); i++)
+        {
+            UStaticMeshComponent* BondMesh = ResInfo->BondMeshes[i];
+            if (!BondMesh)
+                continue;
+
+            // Get atom names for this bond
+            if (i < ResInfo->BondPairs.Num())
+            {
+                const TPair<int32, int32>& BondPair = ResInfo->BondPairs[i];
+                const FString& Atom1Name = (BondPair.Key < ResInfo->AtomNames.Num()) ? ResInfo->AtomNames[BondPair.Key] : TEXT("");
+                const FString& Atom2Name = (BondPair.Value < ResInfo->AtomNames.Num()) ? ResInfo->AtomNames[BondPair.Value] : TEXT("");
+
+                bool bShouldBeVisible = ShouldBondBeVisibleAtLOD(Atom1Name, Atom2Name, NewLODLevel);
+                BondMesh->SetVisibility(bShouldBeVisible, false);
+            }
+        }
+    }
+
+    // Apply LOD to all ligands
+    for (const auto& Pair : LigandMap)
+    {
+        FLigandInfo* LigInfo = Pair.Value;
+        if (!LigInfo || !LigInfo->bIsVisible)
+            continue;
+
+        // For ligands, show at full detail at LOD 0 and 1, hide at LOD 2+
+        bool bShowLigand = (NewLODLevel <= 1);
+
+        for (UStaticMeshComponent* AtomMesh : LigInfo->AtomMeshes)
+        {
+            if (AtomMesh)
+                AtomMesh->SetVisibility(bShowLigand, false);
+        }
+
+        for (UStaticMeshComponent* BondMesh : LigInfo->BondMeshes)
+        {
+            if (BondMesh)
+                BondMesh->SetVisibility(bShowLigand, false);
+        }
+    }
+}
+
+bool APDBViewer::ShouldAtomBeVisibleAtLOD(const FString& AtomName, int32 LODLevel) const
+{
+    if (LODLevel == 0)
+        return true;  // Full detail - show everything
+
+    if (LODLevel == 1)
+        return true;  // Medium detail - show all atoms
+
+    if (LODLevel == 2)
+    {
+        // Low detail - backbone atoms only (CA, C, N, O)
+        return (AtomName == TEXT("CA") ||
+                AtomName == TEXT("C") ||
+                AtomName == TEXT("N") ||
+                AtomName == TEXT("O"));
+    }
+
+    // LOD 3 - hide all individual atoms (will show center of mass sphere instead)
+    return false;
+}
+
+bool APDBViewer::ShouldBondBeVisibleAtLOD(const FString& Atom1Name, const FString& Atom2Name, int32 LODLevel) const
+{
+    if (LODLevel == 0)
+        return true;  // Full detail - show all bonds
+
+    if (LODLevel == 1)
+    {
+        // Medium detail - backbone bonds only
+        TSet<FString> BackboneAtoms = {TEXT("CA"), TEXT("C"), TEXT("N"), TEXT("O")};
+        return BackboneAtoms.Contains(Atom1Name) && BackboneAtoms.Contains(Atom2Name);
+    }
+
+    // LOD 2 and 3 - no bonds
+    return false;
+}
+
+void APDBViewer::SetForcedLODLevel(int32 LODLevel)
+{
+    ForcedLODLevel = LODLevel;
+
+    if (LODLevel >= 0 && LODLevel <= 3)
+    {
+        ApplyLODLevel(LODLevel);
+        CurrentLODLevel = LODLevel;
+        UE_LOG(LogTemp, Log, TEXT("Forced LOD level to %d"), LODLevel);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Log, TEXT("LOD level set to automatic"));
+    }
+}
+
+// ===== END LOD SYSTEM IMPLEMENTATION =====
 
 void APDBViewer::OnLigandsLoadedHandler()
 {
@@ -189,6 +454,7 @@ void APDBViewer::ParsePDB(const FString &Content)
     ClearResidueMap();
     ClearLigandMap();
     ChainIDs.Empty();
+    ClearTrimCache();  // OPTIMIZATION #15: Clear trim cache for new parse
 
     TArray<FString> Lines;
     Content.ParseIntoArrayLines(Lines);
@@ -257,6 +523,7 @@ void APDBViewer::ParseMMCIF(const FString &Content)
     ClearResidueMap();
     ClearLigandMap();
     ChainIDs.Empty();
+    ClearTrimCache();  // OPTIMIZATION #15: Clear trim cache for new parse
 
     TArray<FString> Lines;
     Content.ParseIntoArrayLines(Lines);
@@ -1343,10 +1610,13 @@ void APDBViewer::DrawSphere(float X, float Y, float Z, const FLinearColor &Col, 
     Sph->SetWorldScale3D(FVector(PDB::SPHERE_SIZE));
     Sph->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-    auto *Mat = UMaterialInstanceDynamic::Create(SphereMaterialAsset, Sph);
-    Mat->SetVectorParameterValue(TEXT("Color"), Col);
-    Mat->SetScalarParameterValue(TEXT("EmissiveIntensity"), 5.0f);
-    Sph->SetMaterial(0, Mat);
+    // OPTIMIZATION #19: Use pooled material instance
+    auto *Mat = GetOrCreateMaterial(Col);
+    if (Mat)
+    {
+        Mat->SetScalarParameterValue(TEXT("EmissiveIntensity"), 5.0f);
+        Sph->SetMaterial(0, Mat);
+    }
 
     Sph->AttachToComponent(Par, FAttachmentTransformRules::KeepWorldTransform);
     Sph->SetRelativeLocation(Par->GetComponentTransform().InverseTransformPosition(FVector(X, Y, Z)));
@@ -1380,10 +1650,13 @@ void APDBViewer::DrawBond(const FVector &S, const FVector &E, int32 Ord, const F
         Cyl->SetWorldRotation(Rot);
         Cyl->SetWorldScale3D(FVector(PDB::CYLINDER_SIZE, PDB::CYLINDER_SIZE, ScaleZ));
         Cyl->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-        auto *Mat = UMaterialInstanceDynamic::Create(SphereMaterialAsset, Cyl);
-        Mat->SetVectorParameterValue(TEXT("Color"), Color);
-        Mat->SetScalarParameterValue(TEXT("EmissiveIntensity"), 2.0f);
-        Cyl->SetMaterial(0, Mat);
+        // OPTIMIZATION #19: Use pooled material instance
+        auto *Mat = GetOrCreateMaterial(Color);
+        if (Mat)
+        {
+            Mat->SetScalarParameterValue(TEXT("EmissiveIntensity"), 2.0f);
+            Cyl->SetMaterial(0, Mat);
+        }
         Cyl->AttachToComponent(Par, FAttachmentTransformRules::KeepWorldTransform);
         Cyl->RegisterComponent();
         Out.Add(Cyl);
@@ -1598,6 +1871,8 @@ void APDBViewer::ClearLigandMap()
         delete P.Value;
     }
     LigandMap.Empty();
+    // OPTIMIZATION #9: Mark chain cache as dirty
+    bLigandChainCacheDirty = true;
 }
 
 void APDBViewer::ToggleResidueVisibility(const FString &Key)
@@ -2358,10 +2633,12 @@ bool APDBViewer::ShowFileDialog(bool bSave, FString &Out)
         return false;
 
     void *Handle = nullptr;
+#if WITH_EDITOR
     if (FModuleManager::Get().IsModuleLoaded("MainFrame"))
         if (auto P = FModuleManager::LoadModuleChecked<IMainFrameModule>("MainFrame").GetParentWindow())
             if (P.IsValid() && P->GetNativeWindow().IsValid())
                 Handle = P->GetNativeWindow()->GetOSWindowHandle();
+#endif
 
     TArray<FString> Files;
     FString FileTypes = TEXT("All Supported (*.pdb;*.cif;*.sdf;*.mol)|*.pdb;*.cif;*.sdf;*.mol|")
@@ -2716,17 +2993,24 @@ void APDBViewer::ClearCurrentStructure()
 {
     ClearResidueMap();
     ClearLigandMap();
-    
+
     // Clear tree node cache
     TreeNodeCache.Empty();
-    
+
+    // OPTIMIZATION #19: Clear material pool
+    MaterialPool.Empty();
+
+    // OPTIMIZATION #17: Reset LOD system cache
+    bStructureCenterCached = false;
+    CurrentLODLevel = 0;
+
     // Clear interaction data and meshes
     for (auto *M : InteractionMeshes)
         if (M && IsValid(M))
             M->DestroyComponent();
     InteractionMeshes.Empty();
     DetectedInteractions.Empty();
-    
+
     // Clear general atom/bond meshes
     for (auto *M : AllAtomMeshes)
         if (M && IsValid(M))

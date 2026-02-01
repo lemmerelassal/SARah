@@ -1,4 +1,6 @@
 #include "Modules/ModuleManager.h"
+
+#if WITH_EDITOR
 #include "SlateBasics.h"
 #include "SlateExtras.h"
 #include "Framework/Docking/TabManager.h"
@@ -65,5 +67,7 @@ private:
         return Extender;
     }
 };
+
+#endif // WITH_EDITOR
 
 // No IMPLEMENT_MODULE in SpheresModule.cpp

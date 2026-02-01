@@ -262,7 +262,10 @@ class SPHERES_API APDBViewer : public AActor
 
 public:
     APDBViewer();
-    
+
+    // OPTIMIZATION #17: Enable ticking for LOD system
+    virtual void Tick(float DeltaTime) override;
+
     DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnResiduesLoaded);
     UPROPERTY(BlueprintAssignable, Category = "PDB Viewer") FOnResiduesLoaded OnResiduesLoaded;
     DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnLigandsLoaded);
@@ -425,6 +428,10 @@ public:
 
     // OPTIMIZATION: Cache ligands organized by chain for faster lookups
     TMap<FString, TArray<FLigandInfo*>> LigandsByChain;
+    bool bLigandChainCacheDirty = true;  // OPTIMIZATION #9: Lazy rebuild flag
+
+    // OPTIMIZATION #19: Material instance pool for color reuse
+    TMap<FLinearColor, UMaterialInstanceDynamic*> MaterialPool;
 
     
 
@@ -434,6 +441,32 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer|Debug")
     void ClearOverlapMarkers();
+
+    // ===== OPTIMIZATION #17: LOD SYSTEM =====
+
+    // Enable/disable LOD system
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|LOD")
+    bool bEnableLODSystem = true;
+
+    // Distance thresholds for LOD levels (in Unreal units)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|LOD")
+    float LOD0Distance = 1000.0f;  // Full detail
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|LOD")
+    float LOD1Distance = 2500.0f;  // Medium detail
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|LOD")
+    float LOD2Distance = 5000.0f;  // Low detail
+
+    // LOD3 is anything beyond LOD2Distance (very low detail)
+
+    // Get current LOD level based on camera distance
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|LOD")
+    int32 GetCurrentLODLevel() const { return CurrentLODLevel; }
+
+    // Force a specific LOD level (set to -1 for automatic)
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|LOD")
+    void SetForcedLODLevel(int32 LODLevel);
 
 protected:
     UFUNCTION()
@@ -498,6 +531,13 @@ protected:
 
     // Optimization: Rebuild ligand chain cache
     void RebuildLigandChainCache();
+
+    // OPTIMIZATION #15: Cached string trimming helper
+    static const FString& GetTrimmedString(const FString& Input);
+    static void ClearTrimCache();
+
+    // OPTIMIZATION #19: Material instance pooling helper
+    UMaterialInstanceDynamic* GetOrCreateMaterial(const FLinearColor& Color);
 
     void DrawSphere(float X, float Y, float Z, const FLinearColor& Color, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
     void DrawBond(const FVector& Start, const FVector& End, int32 Order, const FString& Element1, const FString& Element2, USceneComponent* Parent, TArray<UStaticMeshComponent*>& OutArray);
@@ -581,7 +621,38 @@ protected:
     
     // Visualize an interaction
     void DrawInteraction(const FMolecularInteraction& Interaction);
-    
+
     // Get color for interaction type
     FLinearColor GetInteractionColor(EInteractionType Type) const;
+
+    // ===== OPTIMIZATION #17: LOD SYSTEM HELPERS =====
+
+    // Current LOD level (0 = highest detail, 3 = lowest)
+    int32 CurrentLODLevel = 0;
+
+    // Forced LOD level (-1 = automatic, 0-3 = forced level)
+    int32 ForcedLODLevel = -1;
+
+    // Cached structure center for LOD distance calculations
+    FVector StructureCenter;
+    bool bStructureCenterCached = false;
+
+    // LOD check interval (seconds) - don't check every frame
+    float LODCheckInterval = 0.5f;
+    float TimeSinceLastLODCheck = 0.0f;
+
+    // Calculate structure center of mass
+    FVector CalculateStructureCenter();
+
+    // Update LOD based on camera distance
+    void UpdateLODLevel();
+
+    // Apply LOD level to all meshes
+    void ApplyLODLevel(int32 NewLODLevel);
+
+    // Check if atom should be visible at given LOD level
+    bool ShouldAtomBeVisibleAtLOD(const FString& AtomName, int32 LODLevel) const;
+
+    // Check if bond should be visible at given LOD level
+    bool ShouldBondBeVisibleAtLOD(const FString& Atom1Name, const FString& Atom2Name, int32 LODLevel) const;
 };
