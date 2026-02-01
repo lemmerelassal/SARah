@@ -141,7 +141,8 @@ void APDBViewer::OnLigandsLoadedHandler()
     DebugPrintLigandInfo();
 
     // OPTIMIZED: Use consolidated helper for hydrogen visibility
-    for (auto &Pair : LigandMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : LigandMap)
     {
         if (Pair.Value)
         {
@@ -192,8 +193,11 @@ void APDBViewer::ParsePDB(const FString &Content)
     TArray<FString> Lines;
     Content.ParseIntoArrayLines(Lines);
 
+    // OPTIMIZATION #1: Reserve capacity based on estimated residue count
     TMap<FString, TMap<FString, FVector>> ResAtoms;
+    ResAtoms.Reserve(Lines.Num() / 10);  // Estimate ~10 lines per residue
     TMap<FString, FResidueMetadata> ResMeta;
+    ResMeta.Reserve(Lines.Num() / 10);
 
     for (const auto &L : Lines)
     {
@@ -258,7 +262,9 @@ void APDBViewer::ParseMMCIF(const FString &Content)
     Content.ParseIntoArrayLines(Lines);
 
     TArray<FString> Hdrs;
+    // OPTIMIZATION #1: Reserve capacity for atom table
     TArray<TArray<FString>> AtomTab;
+    AtomTab.Reserve(Lines.Num() / 2);  // Estimate ~2 lines per atom entry
     int32 XI = -1, YI = -1, ZI = -1, RI = -1, AI = -1, GI = -1, CI = -1, SI = -1;
     bool bLoop = false;
 
@@ -300,8 +306,11 @@ void APDBViewer::ParseMMCIF(const FString &Content)
         }
     }
 
+    // OPTIMIZATION #1: Reserve capacity based on atom table size
     TMap<FString, TMap<FString, FVector>> ResAtoms;
+    ResAtoms.Reserve(AtomTab.Num() / 8);  // Estimate ~8 atoms per residue
     TMap<FString, FResidueMetadata> ResMeta;
+    ResMeta.Reserve(AtomTab.Num() / 8);
 
     for (const auto &R : AtomTab)
     {
@@ -391,7 +400,9 @@ void APDBViewer::ParseStructureBondsFromCIF(const FString &Content)
     int32 CompIdIdx = -1, Atom1Idx = -1, Atom2Idx = -1, OrderIdx = -1;
 
     // Maps to store bonds by component type (residue name like "ALA", "GLY", "ATP", etc.)
+    // OPTIMIZATION #1: Reserve capacity for common residue types
     TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>> ComponentBonds;
+    ComponentBonds.Reserve(50);  // Typical proteins have ~20 amino acids + common ligands
 
     for (const FString &Line : Lines)
     {
@@ -471,7 +482,8 @@ void APDBViewer::ParseStructureBondsFromCIF(const FString &Content)
 void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>> &ComponentBonds)
 {
     // Apply to regular residues (ATOM records)
-    for (auto &Pair : ResidueMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : ResidueMap)
     {
         FResidueInfo *ResInfo = Pair.Value;
         if (!ResInfo)
@@ -493,6 +505,10 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
 
         UE_LOG(LogTemp, Log, TEXT("Applying %d bonds to residue %s %s"),
                BondData->Num(), *ResInfo->ResidueName, *ResInfo->ResidueSeq);
+
+        // OPTIMIZATION #2: Preallocate bond arrays
+        ResInfo->BondPairs.Reserve(ResInfo->BondPairs.Num() + BondData->Num());
+        ResInfo->BondOrders.Reserve(ResInfo->BondOrders.Num() + BondData->Num());
 
         // Apply bonds
         for (const auto &BondInfo : *BondData)
@@ -524,7 +540,8 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
     }
 
     // Apply to ligands (HETATM records)
-    for (auto &Pair : LigandMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : LigandMap)
     {
         FLigandInfo *LigInfo = Pair.Value;
         if (!LigInfo)
@@ -553,6 +570,10 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
 
         UE_LOG(LogTemp, Log, TEXT("Applying %d bonds to ligand %s"),
                BondData->Num(), *LigInfo->LigandName);
+
+        // OPTIMIZATION #2: Preallocate bond arrays
+        LigInfo->BondPairs.Reserve(LigInfo->BondPairs.Num() + BondData->Num());
+        LigInfo->BondOrders.Reserve(LigInfo->BondOrders.Num() + BondData->Num());
 
         // Apply bonds
         for (const auto &BondInfo : *BondData)
@@ -1100,6 +1121,17 @@ void APDBViewer::DrawProteinBondsAndConnectivity(const TMap<FString, FVector> &A
         AtomNameToIndex.Add(Pair.Key, Idx);
     }
 
+    // OPTIMIZATION #10: Pre-extract element names to avoid O(n²) repeated extractions
+    TArray<FString> Elements;
+    Elements.Reserve(Atoms.Num());
+    for (const auto& Atom : Atoms)
+    {
+        FString Element = Atom.Key.TrimStartAndEnd().Left(1);
+        if (Atom.Key.Len() > 1 && FChar::IsLower(Atom.Key[1]))
+            Element = Atom.Key.Left(2);
+        Elements.Add(Element);
+    }
+
     for (int32 i = 0; i < Atoms.Num(); ++i)
     {
         for (int32 j = i + 1; j < Atoms.Num(); ++j)
@@ -1108,13 +1140,8 @@ void APDBViewer::DrawProteinBondsAndConnectivity(const TMap<FString, FVector> &A
 
             if (Distance < BondThreshold)
             {
-                FString Element1 = Atoms[i].Key.TrimStartAndEnd().Left(1);
-                if (Atoms[i].Key.Len() > 1 && FChar::IsLower(Atoms[i].Key[1]))
-                    Element1 = Atoms[i].Key.Left(2);
-
-                FString Element2 = Atoms[j].Key.TrimStartAndEnd().Left(1);
-                if (Atoms[j].Key.Len() > 1 && FChar::IsLower(Atoms[j].Key[1]))
-                    Element2 = Atoms[j].Key.Left(2);
+                const FString& Element1 = Elements[i];
+                const FString& Element2 = Elements[j];
 
                 // Store bond connectivity
                 ResInfo->BondPairs.Add(TPair<int32, int32>(i, j));
@@ -2259,7 +2286,8 @@ FLigandInfo *APDBViewer::GetVisibleLigandInfo() const
     FLigandInfo *BestInfo = nullptr;
     int32 BestCount = 0;
 
-    for (auto &Pair : LigandMap)
+    // OPTIMIZATION #12: Use const reference (read-only iteration)
+    for (const auto &Pair : LigandMap)
     {
         FLigandInfo *Info = Pair.Value;
         if (!Info || !Info->bIsVisible)
@@ -2488,7 +2516,8 @@ void APDBViewer::DebugPrintLigandInfo()
     UE_LOG(LogTemp, Log, TEXT("=== Ligand Debug Info ==="));
     UE_LOG(LogTemp, Log, TEXT("Total ligands: %d"), LigandMap.Num());
 
-    for (auto &Pair : LigandMap)
+    // OPTIMIZATION #12: Use const reference (read-only logging)
+    for (const auto &Pair : LigandMap)
     {
         FLigandInfo *Info = Pair.Value;
         if (!Info)
@@ -2512,7 +2541,8 @@ void APDBViewer::DebugPrintLigandInfo()
             ElementCounts.FindOrAdd(Elem, 0)++;
 
         UE_LOG(LogTemp, Log, TEXT("  Elements:"));
-        for (auto &ElemPair : ElementCounts)
+        // OPTIMIZATION #12: Use const reference (read-only logging)
+        for (const auto &ElemPair : ElementCounts)
             UE_LOG(LogTemp, Log, TEXT("    %s: %d"), *ElemPair.Key, ElemPair.Value);
 
         if (Info->BondOrders.Num() > 0)
@@ -2611,13 +2641,15 @@ void APDBViewer::AddExplicitHydrogens()
         return;
 
     // OPTIMIZED: Use consolidated helpers for hydrogen visibility
-    for (auto &Pair : LigandMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : LigandMap)
     {
         if (Pair.Value)
             UpdateLigandHydrogenVisibility(Pair.Value, true);
     }
 
-    for (auto &Pair : ResidueMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : ResidueMap)
     {
         if (Pair.Value)
             UpdateResidueHydrogenVisibility(Pair.Value, true);
@@ -2633,13 +2665,15 @@ void APDBViewer::RemoveExplicitHydrogens()
         return;
 
     // OPTIMIZED: Use consolidated helpers for hydrogen visibility
-    for (auto &Pair : LigandMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : LigandMap)
     {
         if (Pair.Value)
             UpdateLigandHydrogenVisibility(Pair.Value, false);
     }
 
-    for (auto &Pair : ResidueMap)
+    // OPTIMIZATION #12: Use const reference (not modifying map entries)
+    for (const auto &Pair : ResidueMap)
     {
         if (Pair.Value)
             UpdateResidueHydrogenVisibility(Pair.Value, false);
