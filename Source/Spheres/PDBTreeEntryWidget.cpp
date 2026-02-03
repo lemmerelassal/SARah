@@ -133,7 +133,7 @@ bool UPDBTreeEntryWidget::GetActualVisibilityForNode(UPDBTreeNode* Node) const
             {
                 TArray<FString> Parts;
                 Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                if (Parts.Num() >= 3 && Parts[Parts.Num() - 1] == Node->ChainID && Pair.Value)
                 {
                     return Pair.Value->bIsVisible;
                 }
@@ -148,7 +148,7 @@ bool UPDBTreeEntryWidget::GetActualVisibilityForNode(UPDBTreeNode* Node) const
             {
                 TArray<FString> Parts;
                 Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                if (Parts.Num() >= 3 && Parts[Parts.Num() - 1] == Node->ChainID && Pair.Value)
                 {
                     // Check if this is a water molecule
                     if (PDBViewerRef->IsWaterKey(Pair.Key))
@@ -170,7 +170,7 @@ bool UPDBTreeEntryWidget::GetActualVisibilityForNode(UPDBTreeNode* Node) const
             {
                 TArray<FString> Parts;
                 Pair.Key.ParseIntoArray(Parts, TEXT("_"));
-                if (Parts.Num() >= 3 && Parts[2] == Node->ChainID && Pair.Value)
+                if (Parts.Num() >= 3 && Parts[Parts.Num() - 1] == Node->ChainID && Pair.Value)
                 {
                     // Check if this is NOT a water molecule
                     if (!PDBViewerRef->IsWaterKey(Pair.Key))

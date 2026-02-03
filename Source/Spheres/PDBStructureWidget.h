@@ -32,6 +32,9 @@ public:
     
     UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
     UButton* Button_Clear;
+    
+    UPROPERTY(BlueprintReadWrite, meta = (BindWidgetOptional))
+    UButton* Button_LoadSDF;
 
 protected:
     UPROPERTY()
@@ -40,6 +43,10 @@ protected:
     // Called when structure loads
     UFUNCTION()
     void OnStructureLoaded();
+
+    // Called when ligands are loaded (e.g. SDF files)
+    UFUNCTION()
+    void OnLigandsLoadedEvent();
 
     // TreeView delegate for getting children - must match UE signature
     void OnGetItemChildren(UObject* Item, TArray<UObject*>& OutChildren);
@@ -56,6 +63,9 @@ protected:
     
     UFUNCTION()
     void OnSaveClicked();
+    
+    UFUNCTION()
+    void OnLoadSDFClicked();
     
     UFUNCTION()
     void OnClearClicked();

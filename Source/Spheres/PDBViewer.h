@@ -144,6 +144,9 @@ struct FLigandInfo
     
     // NEW: Flag to distinguish water from ligands
     bool bIsWater = false;
+
+    // Flag to mark ligands loaded from SDF files (preserved across PDB reloads)
+    bool bFromSDF = false;
     
     // OPTIMIZED: Cached data
     FVector CachedCenterOfMass;
@@ -292,6 +295,17 @@ public:
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void LoadSDFFromString(const FString& SDFContent);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void OpenSaveDialog();
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void OpenLoadDialog();
+    
+    // File dialog helpers
+    bool ShowFileDialog(bool bSave, FString& OutFilePath);
+    bool ShowSDFFileDialog(FString& OutFilePath);
+    
+    // Parse SDF content (can be called directly if you have the content)
+    void ParseSDF(const FString& FileContent);
+    
+    // Clear the tree node cache (call before repopulating tree after adding ligands)
+    void ClearTreeNodeCache();
+    
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") TArray<UPDBMoleculeNode*> GetMoleculeNodes();
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void PopulateMoleculeListView(class UListView* ListView);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void ToggleMoleculeVisibility(const FString& MoleculeKey);
@@ -509,7 +523,6 @@ protected:
     void FetchFileAsync(const FString& URL, TFunction<void(bool, const FString&)> Callback);
     void ParsePDB(const FString& FileContent);
     void ParseMMCIF(const FString& FileContent);
-    void ParseSDF(const FString& FileContent);
     void CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FVector>>& ResidueAtoms, const TMap<FString, FResidueMetadata>& Metadata);
     void DrawProteinBondsAndConnectivity(const TMap<FString, FVector>& AtomPositions, FResidueInfo* ResInfo);
     void GenerateHydrogensForResidue(FResidueInfo* ResInfo);
@@ -592,7 +605,6 @@ protected:
     FLinearColor GetElementColor(const FString& Element) const;
     void ClearResidueMap();
     void ClearLigandMap();
-    bool ShowFileDialog(bool bSave, FString& OutFilePath);
     
     // Hydrogen generation helpers
     int32 AddHydrogensToLigand(FLigandInfo* LigInfo);

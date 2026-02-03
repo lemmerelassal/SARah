@@ -43,25 +43,40 @@ FString APDBViewer::GetChainFromLigandKey(const FString& Key)
 
 void APDBViewer::ParseLigandKey(const FString& Key, FString& OutName, FString& OutSeq, FString& OutChain)
 {
-    int32 FirstUnderscore = INDEX_NONE;
-    int32 SecondUnderscore = INDEX_NONE;
-
     OutName = OutSeq = OutChain = TEXT("");
 
-    if (Key.FindChar('_', FirstUnderscore))
+    // Key format: "Name_Seq_Chain" where Name may contain underscores but Seq and Chain never do.
+    // Find the last two underscores to split correctly.
+    int32 LastUnderscore = INDEX_NONE;
+    int32 SecondLastUnderscore = INDEX_NONE;
+    for (int32 i = Key.Len() - 1; i >= 0; --i)
     {
-        OutName = Key.Left(FirstUnderscore);
-        SecondUnderscore = Key.Find(TEXT("_"), ESearchCase::IgnoreCase, ESearchDir::FromStart, FirstUnderscore + 1);
+        if (Key[i] == '_')
+        {
+            if (LastUnderscore == INDEX_NONE)
+                LastUnderscore = i;
+            else
+            {
+                SecondLastUnderscore = i;
+                break;
+            }
+        }
+    }
 
-        if (SecondUnderscore != INDEX_NONE)
-        {
-            OutSeq = Key.Mid(FirstUnderscore + 1, SecondUnderscore - FirstUnderscore - 1);
-            OutChain = Key.RightChop(SecondUnderscore + 1);
-        }
-        else
-        {
-            OutSeq = Key.RightChop(FirstUnderscore + 1);
-        }
+    if (LastUnderscore == INDEX_NONE)
+    {
+        OutName = Key;
+    }
+    else if (SecondLastUnderscore == INDEX_NONE)
+    {
+        OutName = Key.Left(LastUnderscore);
+        OutSeq = Key.Mid(LastUnderscore + 1);
+    }
+    else
+    {
+        OutName = Key.Left(SecondLastUnderscore);
+        OutSeq = Key.Mid(SecondLastUnderscore + 1, LastUnderscore - SecondLastUnderscore - 1);
+        OutChain = Key.Mid(LastUnderscore + 1);
     }
 }
 
@@ -625,6 +640,25 @@ void APDBViewer::FetchFileAsync(const FString &URL, TFunction<void(bool, const F
 void APDBViewer::ParsePDB(const FString &Content)
 {
     CurrentPDBContent = Content;
+
+    // Preserve SDF-loaded ligands across PDB reload (they would be destroyed by ClearLigandMap)
+    TMap<FString, FLigandInfo*> SavedSDFLigands;
+    {
+        auto It = LigandMap.CreateIterator();
+        while (It)
+        {
+            if (It->Value && It->Value->bFromSDF)
+            {
+                SavedSDFLigands.Add(It->Key, It->Value);
+                It.RemoveCurrent();
+            }
+            else
+            {
+                ++It;
+            }
+        }
+    }
+
     ClearResidueMap();
     ClearLigandMap();
     ChainIDs.Empty();
@@ -680,6 +714,26 @@ void APDBViewer::ParsePDB(const FString &Content)
 
     CreateResiduesFromAtomData(ResAtoms, ResMeta);
 
+    // Restore SDF ligands that were saved before the clear
+    for (auto &P : SavedSDFLigands)
+    {
+        LigandMap.Add(P.Key, P.Value);
+        // Re-add the SDF ligand's chain so it appears in the tree
+        if (P.Value)
+        {
+            TArray<FString> Parts;
+            P.Key.ParseIntoArray(Parts, TEXT("_"));
+            if (Parts.Num() >= 3)
+            {
+                ChainIDs.Add(Parts[Parts.Num() - 1]);
+            }
+        }
+    }
+    if (SavedSDFLigands.Num() > 0)
+    {
+        bLigandChainCacheDirty = true;
+    }
+
     // Fetch bonds from the structure's mmCIF file
     if (!CurrentStructureID.IsEmpty())
     {
@@ -694,6 +748,25 @@ void APDBViewer::ParsePDB(const FString &Content)
 void APDBViewer::ParseMMCIF(const FString &Content)
 {
     CurrentPDBContent = Content;
+
+    // Preserve SDF-loaded ligands across mmCIF reload (they would be destroyed by ClearLigandMap)
+    TMap<FString, FLigandInfo*> SavedSDFLigands;
+    {
+        auto It = LigandMap.CreateIterator();
+        while (It)
+        {
+            if (It->Value && It->Value->bFromSDF)
+            {
+                SavedSDFLigands.Add(It->Key, It->Value);
+                It.RemoveCurrent();
+            }
+            else
+            {
+                ++It;
+            }
+        }
+    }
+
     ClearResidueMap();
     ClearLigandMap();
     ChainIDs.Empty();
@@ -793,6 +866,26 @@ void APDBViewer::ParseMMCIF(const FString &Content)
     }
 
     CreateResiduesFromAtomData(ResAtoms, ResMeta);
+
+    // Restore SDF ligands that were saved before the clear
+    for (auto &P : SavedSDFLigands)
+    {
+        LigandMap.Add(P.Key, P.Value);
+        // Re-add the SDF ligand's chain so it appears in the tree
+        if (P.Value)
+        {
+            TArray<FString> Parts;
+            P.Key.ParseIntoArray(Parts, TEXT("_"));
+            if (Parts.Num() >= 3)
+            {
+                ChainIDs.Add(Parts[Parts.Num() - 1]);
+            }
+        }
+    }
+    if (SavedSDFLigands.Num() > 0)
+    {
+        bLigandChainCacheDirty = true;
+    }
 
     // Fetch bonds from the structure's mmCIF file (or parse from this file if it's the same)
     if (!CurrentStructureID.IsEmpty())
@@ -1196,8 +1289,9 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
 
 void APDBViewer::ParseSDF(const FString &Content)
 {
-    CurrentPDBContent = Content;
-    ClearLigandMap();
+    // Don't overwrite CurrentPDBContent — that stores the PDB/mmCIF source for save/reload
+    // Don't clear ligand map - we want to ADD ligands, not replace them
+    // ClearLigandMap();
 
     TArray<FString> Lines;
     Content.ParseIntoArrayLines(Lines);
@@ -1306,12 +1400,35 @@ void APDBViewer::ParseSDF(const FString &Content)
             }
         }
 
-        // OPTIMIZATION #9: Key is just MoleculeName
-        FString Key = MoleculeName;
+        // Create proper ligand key in format "NAME_SEQ_CHAIN"
+        // Assign to first available chain, or create a default "SDF" chain
+        FString AssignedChain = TEXT("SDF");
+        if (ChainIDs.Num() > 0)
+        {
+            // FIX: Convert to sorted array to ensure consistent chain assignment
+            TArray<FString> SortedChains = ChainIDs.Array();
+            SortedChains.Sort();
+            AssignedChain = SortedChains[0];  // Use first chain alphabetically (usually "A")
+            UE_LOG(LogTemp, Warning, TEXT("ParseSDF: Assigning to chain '%s' (from %d available chains)"), 
+                   *AssignedChain, ChainIDs.Num());
+        }
+        else
+        {
+            // No chains exist, create a default one
+            ChainIDs.Add(AssignedChain);
+            UE_LOG(LogTemp, Warning, TEXT("ParseSDF: No chains exist, created default chain '%s'"), *AssignedChain);
+        }
+        
+        // Create key: "MoleculeName_Index_Chain"
+        FString Key = FString::Printf(TEXT("%s_%d_%s"), *MoleculeName, MoleculeIndex + 1, *AssignedChain);
+        
+        UE_LOG(LogTemp, Warning, TEXT("ParseSDF: Creating ligand with key: '%s' (Chain: '%s')"), *Key, *AssignedChain);
 
         auto *Info = new FLigandInfo();
         Info->LigandName = MoleculeName;
-        Info->bIsVisible = false;
+        Info->bIsVisible = true; // Make SDF ligands visible by default
+        Info->bIsWater = false;  // FIX: SDF ligands are NOT water molecules
+        Info->bFromSDF = true;   // Mark as SDF-sourced so it survives PDB reloads
         Info->AtomPositions = AtomPositions;
         Info->AtomElements = AtomElements;
 
@@ -1340,11 +1457,16 @@ void APDBViewer::ParseSDF(const FString &Content)
                      Info->AtomElements[A1], Info->AtomElements[A2], GetRootComponent(), Info->BondMeshes);
         }
 
-        SetMeshArrayVisibility(Info->AtomMeshes, Info->bIsVisible);
-        SetMeshArrayVisibility(Info->BondMeshes, Info->bIsVisible);
+        SetMeshArrayVisibility(Info->AtomMeshes, true); // Show SDF ligands
+        SetMeshArrayVisibility(Info->BondMeshes, true);
 
-        // OPTIMIZATION #9: Key is just MoleculeName
-        LigandMap.Add(MoleculeName, Info);
+        // Add to ligand map with proper chain-based key
+        LigandMap.Add(Key, Info);
+        
+        UE_LOG(LogTemp, Warning, TEXT("Added ligand to map: %s"), *Key);
+        
+        // Mark ligand chain cache as dirty so it gets rebuilt
+        bLigandChainCacheDirty = true;
 
         LineIndex = BondStartLine + NumBonds;
         while (LineIndex < Lines.Num())
@@ -1359,6 +1481,11 @@ void APDBViewer::ParseSDF(const FString &Content)
 
         MoleculeIndex++;
     }
+
+    UE_LOG(LogTemp, Warning, TEXT("========================================"));
+    UE_LOG(LogTemp, Warning, TEXT("ParseSDF COMPLETE: Added %d molecules"), MoleculeIndex);
+    UE_LOG(LogTemp, Warning, TEXT("LigandMap now contains %d total entries"), LigandMap.Num());
+    UE_LOG(LogTemp, Warning, TEXT("========================================"));
 
     // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
     RebuildLigandChainCache();
@@ -2024,6 +2151,10 @@ TArray<UPDBTreeNode*> APDBViewer::GetWaterNodesForChain(const FString& ChainID)
 
 TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
 {
+    UE_LOG(LogTemp, Warning, TEXT("========================================"));
+    UE_LOG(LogTemp, Warning, TEXT("GetLigandNodesForChain called for chain: '%s'"), *ChainID);
+    UE_LOG(LogTemp, Warning, TEXT("Total ligands in LigandMap: %d"), LigandMap.Num());
+    
     TArray<UPDBTreeNode*> Nodes;
     TArray<FString> Keys;
     LigandMap.GetKeys(Keys);
@@ -2031,28 +2162,53 @@ TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
     // Sort by name then sequence number
     Keys.Sort(GetLigandKeyComparator(true));
 
+    int32 MatchCount = 0;
+    int32 WaterSkipCount = 0;
+    int32 ChainMismatchCount = 0;
+
     for (const FString& Key : Keys)
     {
         // Skip water molecules - they go in the Water category
         if (IsWaterKey(Key))
+        {
+            WaterSkipCount++;
             continue;
+        }
 
         const auto* Info = SafeDereference(LigandMap.Find(Key));
         if (!Info)
             continue;
         
-        // Extract chain from key (format: "ATP_501_A") - OPTIMIZED
+        // Extract chain from key (format: "ATP_501_A" or "MolName_1_A")
         FString KeyChain = GetChainFromLigandKey(Key);
         
         if (KeyChain != ChainID)
+        {
+            ChainMismatchCount++;
+            // Log first few mismatches for debugging
+            if (ChainMismatchCount <= 3)
+            {
+                UE_LOG(LogTemp, Warning, TEXT("  Chain mismatch: Key='%s', KeyChain='%s', Requested='%s'"),
+                       *Key, *KeyChain, *ChainID);
+            }
             continue;
+        }
 
+        MatchCount++;
+        
         UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
         Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Ligand, ChainID);
         Node->bIsVisible = Info->bIsVisible;
 
         Nodes.Add(Node);
     }
+    
+    UE_LOG(LogTemp, Warning, TEXT("GetLigandNodesForChain summary for '%s':"), *ChainID);
+    UE_LOG(LogTemp, Warning, TEXT("  - Total keys: %d"), Keys.Num());
+    UE_LOG(LogTemp, Warning, TEXT("  - Waters skipped: %d"), WaterSkipCount);
+    UE_LOG(LogTemp, Warning, TEXT("  - Chain mismatches: %d"), ChainMismatchCount);
+    UE_LOG(LogTemp, Warning, TEXT("  - Matches returned: %d"), MatchCount);
+    UE_LOG(LogTemp, Warning, TEXT("========================================"));
 
     return Nodes;
 }
@@ -2193,6 +2349,30 @@ void APDBViewer::PopulateTreeView(UTreeView *TreeView)
     }
 
     UE_LOG(LogTemp, Warning, TEXT("====== PopulateTreeView starting ======"));
+    UE_LOG(LogTemp, Warning, TEXT("LigandMap contains %d entries"), LigandMap.Num());
+    UE_LOG(LogTemp, Warning, TEXT("ChainIDs contains %d chains"), ChainIDs.Num());
+    
+    // Log all chains
+    for (const FString& Chain : ChainIDs)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("  Chain in ChainIDs: '%s'"), *Chain);
+    }
+    
+    // Log first few ligand keys to see their format
+    int32 LogCount = 0;
+    for (const auto& Pair : LigandMap)
+    {
+        if (LogCount < 5)
+        {
+            FString KeyChain = GetChainFromLigandKey(Pair.Key);
+            UE_LOG(LogTemp, Warning, TEXT("  LigandMap key: '%s' -> Chain: '%s'"), *Pair.Key, *KeyChain);
+            LogCount++;
+        }
+    }
+    if (LigandMap.Num() > 5)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("  ... and %d more ligands"), LigandMap.Num() - 5);
+    }
 
     TreeView->ClearListItems();
     
@@ -2270,7 +2450,6 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             // Chain has two category children: Residues and Heteroatoms
             
             // Get or create "Residues" category node
-            // OPTIMIZATION #9: Use FStringBuilder instead of Printf
             FString ResiduesKey = TStringBuilder<64>().Append(TEXT("RESIDUES_")).Append(Node->ChainID).ToString();
             UPDBTreeNode** ResiduesCategoryPtr = TreeNodeCache.Find(ResiduesKey);
             UPDBTreeNode* ResiduesCategory = nullptr;
@@ -2288,14 +2467,27 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             }
             ChildNodes.Add(ResiduesCategory);
             
-            // Get or create "Heteroatoms" category node (only if there are any)
-            // OPTIMIZED: Use chain cache for O(1) lookup instead of full map iteration
-            const TArray<FLigandInfo*>* ChainLigands = LigandsByChain.Find(Node->ChainID);
-            bool bHasHeteroatoms = (ChainLigands && ChainLigands->Num() > 0);
+            // FIX: Check for heteroatoms by directly scanning LigandMap
+            // This is more reliable than using the LigandsByChain cache
+            bool bHasHeteroatoms = false;
+            for (const auto& Pair : LigandMap)
+            {
+                if (Pair.Value)
+                {
+                    FString KeyChain = GetChainFromLigandKey(Pair.Key);
+                    if (KeyChain == Node->ChainID)
+                    {
+                        bHasHeteroatoms = true;
+                        break;
+                    }
+                }
+            }
+            
+            UE_LOG(LogTemp, Warning, TEXT("Chain %s: bHasHeteroatoms = %s (LigandMap has %d entries)"),
+                   *Node->ChainID, bHasHeteroatoms ? TEXT("true") : TEXT("false"), LigandMap.Num());
             
             if (bHasHeteroatoms)
             {
-                // OPTIMIZATION #9: Use FStringBuilder instead of Printf
                 FString HeteroatomsKey = TStringBuilder<64>().Append(TEXT("HETEROATOMS_")).Append(Node->ChainID).ToString();
                 UPDBTreeNode** HeteroatomsCategoryPtr = TreeNodeCache.Find(HeteroatomsKey);
                 UPDBTreeNode* HeteroatomsCategory = nullptr;
@@ -2335,22 +2527,23 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             TArray<UPDBTreeNode*> Waters = GetWaterNodesForChain(Node->ChainID);
             if (Waters.Num() > 0)
             {
-                // OPTIMIZATION #9: Use FStringBuilder instead of Printf
                 FString WaterKey = TStringBuilder<64>().Append(TEXT("WATER_")).Append(Node->ChainID).ToString();
                 UPDBTreeNode** WaterCategoryPtr = TreeNodeCache.Find(WaterKey);
                 UPDBTreeNode* WaterCategory = nullptr;
                 
+                // FIX: Build display name with current count FIRST
+                FString WaterDisplayName = TStringBuilder<64>().Appendf(TEXT("Water (%d)"), Waters.Num()).ToString();
+                
                 if (WaterCategoryPtr && *WaterCategoryPtr)
                 {
                     WaterCategory = *WaterCategoryPtr;
+                    // FIX: Update DisplayName to reflect current count
+                    WaterCategory->DisplayName = WaterDisplayName;
                 }
                 else
                 {
                     WaterCategory = NewObject<UPDBTreeNode>(this);
-                    // OPTIMIZATION #9: Use Appendf for integer formatting
-                    WaterCategory->InitializeWithType(
-                        TStringBuilder<64>().Appendf(TEXT("Water (%d)"), Waters.Num()).ToString(),
-                        WaterKey,
+                    WaterCategory->InitializeWithType(WaterDisplayName, WaterKey,
                         EPDBNodeType::WaterCategory, Node->ChainID);
                     TreeNodeCache.Add(WaterKey, WaterCategory);
                 }
@@ -2359,24 +2552,32 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
             
             // Check if there are any ligands for this chain
             TArray<UPDBTreeNode*> Ligands = GetLigandNodesForChain(Node->ChainID);
+            
+            UE_LOG(LogTemp, Warning, TEXT("HeteroatomsCategory for chain %s: Found %d ligands"),
+                   *Node->ChainID, Ligands.Num());
+            
             if (Ligands.Num() > 0)
             {
-                // OPTIMIZATION #9: Use FStringBuilder instead of Printf
                 FString LigandsKey = TStringBuilder<64>().Append(TEXT("LIGANDS_")).Append(Node->ChainID).ToString();
                 UPDBTreeNode** LigandsCategoryPtr = TreeNodeCache.Find(LigandsKey);
                 UPDBTreeNode* LigandsCategory = nullptr;
                 
+                // FIX: Build display name with current count FIRST
+                FString LigandsDisplayName = TStringBuilder<64>().Appendf(TEXT("Ligands (%d)"), Ligands.Num()).ToString();
+                
+                UE_LOG(LogTemp, Warning, TEXT("Creating/updating LigandsCategory with DisplayName: %s"),
+                       *LigandsDisplayName);
+                
                 if (LigandsCategoryPtr && *LigandsCategoryPtr)
                 {
                     LigandsCategory = *LigandsCategoryPtr;
+                    // FIX: Update DisplayName to reflect current count
+                    LigandsCategory->DisplayName = LigandsDisplayName;
                 }
                 else
                 {
                     LigandsCategory = NewObject<UPDBTreeNode>(this);
-                    // OPTIMIZATION #9: Use Appendf for integer formatting
-                    LigandsCategory->InitializeWithType(
-                        TStringBuilder<64>().Appendf(TEXT("Ligands (%d)"), Ligands.Num()).ToString(),
-                        LigandsKey,
+                    LigandsCategory->InitializeWithType(LigandsDisplayName, LigandsKey,
                         EPDBNodeType::LigandsCategory, Node->ChainID);
                     TreeNodeCache.Add(LigandsKey, LigandsCategory);
                 }
@@ -2400,6 +2601,10 @@ TArray<UObject*> APDBViewer::GetChildrenForNode(UPDBTreeNode* Node)
         {
             // Ligands category contains individual ligands
             TArray<UPDBTreeNode*> Ligands = GetLigandNodesForChain(Node->ChainID);
+            
+            UE_LOG(LogTemp, Warning, TEXT("LigandsCategory expansion for chain %s: returning %d ligand nodes"),
+                   *Node->ChainID, Ligands.Num());
+            
             for (UPDBTreeNode* Ligand : Ligands)
             {
                 ChildNodes.Add(Ligand);
@@ -2579,6 +2784,34 @@ void APDBViewer::OpenLoadDialog()
     FString P;
     if (ShowFileDialog(false, P))
         LoadStructureFromFile(P);
+}
+
+bool APDBViewer::ShowSDFFileDialog(FString& OutFilePath)
+{
+    auto* DP = FDesktopPlatformModule::Get();
+    if (!DP)
+        return false;
+
+    void* Handle = nullptr;
+#if WITH_EDITOR
+    if (FModuleManager::Get().IsModuleLoaded("MainFrame"))
+        if (auto P = FModuleManager::LoadModuleChecked<IMainFrameModule>("MainFrame").GetParentWindow())
+            if (P.IsValid() && P->GetNativeWindow().IsValid())
+                Handle = P->GetNativeWindow()->GetOSWindowHandle();
+#endif
+
+    TArray<FString> Files;
+    FString FileTypes = TEXT("SDF/MOL Files (*.sdf;*.mol)|*.sdf;*.mol");
+
+    bool bOK = DP->OpenFileDialog(Handle, TEXT("Load SDF File"), FPaths::ProjectSavedDir(), TEXT(""),
+                                   FileTypes, EFileDialogFlags::None, Files);
+
+    if (bOK && Files.Num() > 0)
+    {
+        OutFilePath = MoveTemp(Files[0]);
+        return true;
+    }
+    return false;
 }
 
 TArray<UPDBMoleculeNode *> APDBViewer::GetMoleculeNodes()
@@ -3013,7 +3246,22 @@ void APDBViewer::LoadSDFFromString(const FString& SDFContent)
 bool APDBViewer::IsWaterKey(const FString& LigandKey) const
 {
     // Key format is "ResidueName_ResidueSeq_Chain" e.g., "HOH_101_A"
+    // FIX: Check the actual bIsWater flag instead of just the name prefix
+    const FLigandInfo* Info = LigandMap.FindRef(LigandKey);
+    if (Info)
+    {
+        // Use the actual bIsWater flag - this is more reliable
+        return Info->bIsWater;
+    }
+    
+    // Fallback for ligands without Info: check name prefix
     return LigandKey.StartsWith(TEXT("HOH_")) ||
            LigandKey.StartsWith(TEXT("H2O_")) ||
            LigandKey.StartsWith(TEXT("WAT_"));
+}
+
+void APDBViewer::ClearTreeNodeCache()
+{
+    TreeNodeCache.Empty();
+    UE_LOG(LogTemp, Warning, TEXT("Tree node cache cleared"));
 }

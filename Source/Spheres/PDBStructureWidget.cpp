@@ -6,6 +6,7 @@
 #include "Components/TextBlock.h"
 #include "Components/Button.h"
 #include "Blueprint/WidgetTree.h"
+#include "Misc/FileHelper.h"
 
 void UPDBStructureWidget::NativeConstruct()
 {
@@ -23,6 +24,9 @@ void UPDBStructureWidget::NativeConstruct()
         {
             // Bind to the OnResiduesLoaded event
             PDBViewerRef->OnResiduesLoaded.AddDynamic(this, &UPDBStructureWidget::OnStructureLoaded);
+
+            // Bind to the OnLigandsLoaded event (covers SDF loading via any path)
+            PDBViewerRef->OnLigandsLoaded.AddDynamic(this, &UPDBStructureWidget::OnLigandsLoadedEvent);
             
             // If TreeView is bound, set up delegates
             if (StructureTreeView)
@@ -57,6 +61,14 @@ void UPDBStructureWidget::ApplyTextStyles()
     {
         if (UTextBlock* TextBlock = Cast<UTextBlock>(Widget))
         {
+            // Check if text block is inside a button - if so, make it white
+            UWidget* Parent = TextBlock->GetParent();
+            if (Parent && Parent->IsA<UButton>())
+            {
+                TextBlock->SetColorAndOpacity(FSlateColor(FLinearColor::White));
+                continue;
+            }
+
             FString WidgetName = TextBlock->GetName();
             
             // Apply colors based on widget naming convention
@@ -122,6 +134,17 @@ void UPDBStructureWidget::ApplyButtonStyles()
             Button_Clear->OnClicked.AddDynamic(this, &UPDBStructureWidget::OnClearClicked);
         }
     }
+    
+    // Style Load SDF button (primary - pink)
+    if (Button_LoadSDF)
+    {
+        Button_LoadSDF->SetBackgroundColor(PinkNormal);
+        
+        if (!Button_LoadSDF->OnClicked.IsBound())
+        {
+            Button_LoadSDF->OnClicked.AddDynamic(this, &UPDBStructureWidget::OnLoadSDFClicked);
+        }
+    }
 }
 
 void UPDBStructureWidget::OnLoadClicked()
@@ -160,6 +183,7 @@ void UPDBStructureWidget::NativeDestruct()
     if (PDBViewerRef)
     {
         PDBViewerRef->OnResiduesLoaded.RemoveDynamic(this, &UPDBStructureWidget::OnStructureLoaded);
+        PDBViewerRef->OnLigandsLoaded.RemoveDynamic(this, &UPDBStructureWidget::OnLigandsLoadedEvent);
     }
     
     Super::NativeDestruct();
@@ -186,4 +210,36 @@ void UPDBStructureWidget::OnGetItemChildren(UObject* Item, TArray<UObject*>& Out
     
     // Get children from PDBViewer
     OutChildren = PDBViewerRef->GetChildrenForNode(Node);
+}
+
+void UPDBStructureWidget::OnLigandsLoadedEvent()
+{
+    if (!StructureTreeView || !PDBViewerRef)
+        return;
+
+    PDBViewerRef->ClearTreeNodeCache();
+    PDBViewerRef->PopulateTreeView(StructureTreeView);
+}
+
+void UPDBStructureWidget::OnLoadSDFClicked()
+{
+    if (!PDBViewerRef)
+        return;
+
+    FString FilePath;
+    if (PDBViewerRef->ShowSDFFileDialog(FilePath))
+    {
+        FString FileContent;
+        if (FFileHelper::LoadFileToString(FileContent, *FilePath))
+        {
+            PDBViewerRef->ParseSDF(FileContent);
+
+            // Explicitly refresh the tree after SDF load
+            if (StructureTreeView)
+            {
+                PDBViewerRef->ClearTreeNodeCache();
+                PDBViewerRef->PopulateTreeView(StructureTreeView);
+            }
+        }
+    }
 }
