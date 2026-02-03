@@ -3,7 +3,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Http.h"
-#include "MMGBSA.h"
 #include "Components/PointLightComponent.h"
 #include "PDBViewer.generated.h"
 
