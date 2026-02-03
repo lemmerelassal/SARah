@@ -1338,6 +1338,8 @@ void APDBViewer::ParseSDF(const FString &Content)
 
         TArray<FVector> AtomPositions;
         TArray<FString> AtomElements;
+        TArray<FString> AtomNames;
+        TMap<FString, int32> ElementCounters; // Per-element counter for generating atom names
         int32 AtomStartLine = CountsLineIndex + 1;
 
         for (int32 i = 0; i < NumAtoms; ++i)
@@ -1376,6 +1378,11 @@ void APDBViewer::ParseSDF(const FString &Content)
 
             AtomPositions.Add(Pos);
             AtomElements.Add(Element);
+
+            // Generate synthetic atom name (e.g. "C1", "C2", "N1") to match PDB convention
+            int32& Count = ElementCounters.FindOrAdd(Element, 0);
+            Count++;
+            AtomNames.Add(TStringBuilder<16>().Append(Element).Appendf(TEXT("%d"), Count).ToString());
         }
 
         int32 BondStartLine = AtomStartLine + NumAtoms;
@@ -1431,6 +1438,7 @@ void APDBViewer::ParseSDF(const FString &Content)
         Info->bFromSDF = true;   // Mark as SDF-sourced so it survives PDB reloads
         Info->AtomPositions = AtomPositions;
         Info->AtomElements = AtomElements;
+        Info->AtomNames = AtomNames;
 
         for (int32 i = 0; i < BondPairs.Num(); ++i)
         {
