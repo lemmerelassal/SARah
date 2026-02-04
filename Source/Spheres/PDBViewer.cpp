@@ -170,7 +170,7 @@ void APDBViewer::SetMeshArrayVisibility(TArray<UStaticMeshComponent*>& Meshes, b
 {
     for (auto* M : Meshes)
     {
-        if (M)
+        if (IsValid(M))
             M->SetVisibility(bVisible, bPropagateToChildren);
     }
 }
@@ -250,9 +250,26 @@ TArray<UPDBTreeNode*> APDBViewer::GetFilteredNodesForChain(const FString& ChainI
         if (KeyChain != ChainID)
             continue;
 
-        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
-        Node->Initialize(CategoryPrefix + Info->LigandName, Key, false, ChainID);
-        Node->bIsVisible = Info->bIsVisible;
+        // Use cache key with prefix to handle different category views
+        FString CacheKey = CategoryPrefix.IsEmpty() ? Key : (CategoryPrefix + Key);
+
+        // Check cache first to prevent GC issues
+        UPDBTreeNode** CachedNode = TreeNodeCache.Find(CacheKey);
+        UPDBTreeNode* Node = nullptr;
+
+        if (CachedNode && IsValid(*CachedNode))
+        {
+            Node = *CachedNode;
+            Node->bIsVisible = Info->bIsVisible;
+        }
+        else
+        {
+            Node = NewObject<UPDBTreeNode>(this);
+            Node->Initialize(CategoryPrefix + Info->LigandName, Key, false, ChainID);
+            Node->bIsVisible = Info->bIsVisible;
+            TreeNodeCache.Add(CacheKey, Node);
+        }
+
         Nodes.Add(Node);
     }
 
@@ -469,6 +486,10 @@ FVector APDBViewer::CalculateStructureCenter()
 
 void APDBViewer::ApplyLODLevel(int32 NewLODLevel)
 {
+    // Early out if no data loaded
+    if (ResidueMap.Num() == 0 && LigandMap.Num() == 0)
+        return;
+
     UE_LOG(LogTemp, Log, TEXT("Applying LOD Level %d (was %d)"), NewLODLevel, CurrentLODLevel);
 
     // Apply LOD to all residues
@@ -482,7 +503,7 @@ void APDBViewer::ApplyLODLevel(int32 NewLODLevel)
         for (int32 i = 0; i < ResInfo->AtomMeshes.Num(); i++)
         {
             UStaticMeshComponent* AtomMesh = ResInfo->AtomMeshes[i];
-            if (!AtomMesh)
+            if (!IsValid(AtomMesh))
                 continue;
 
             const FString& AtomName = (i < ResInfo->AtomNames.Num()) ? ResInfo->AtomNames[i] : TEXT("");
@@ -495,7 +516,7 @@ void APDBViewer::ApplyLODLevel(int32 NewLODLevel)
         for (int32 i = 0; i < ResInfo->BondMeshes.Num(); i++)
         {
             UStaticMeshComponent* BondMesh = ResInfo->BondMeshes[i];
-            if (!BondMesh)
+            if (!IsValid(BondMesh))
                 continue;
 
             // Get atom names for this bond
@@ -564,8 +585,6 @@ bool APDBViewer::ShouldBondBeVisibleAtLOD(const FString& Atom1Name, const FStrin
 
 void APDBViewer::SetForcedLODLevel(int32 LODLevel)
 {
-
-    LODLevel = 0;
     ForcedLODLevel = LODLevel;
 
     if (LODLevel >= 0 && LODLevel <= 3)
@@ -643,12 +662,17 @@ void APDBViewer::ParsePDB(const FString &Content)
 
     // Preserve SDF-loaded ligands across PDB reload (they would be destroyed by ClearLigandMap)
     TMap<FString, FLigandInfo*> SavedSDFLigands;
+    TArray<UStaticMeshComponent*> SavedAtomMeshes;
+    TArray<UStaticMeshComponent*> SavedBondMeshes;
     {
         auto It = LigandMap.CreateIterator();
         while (It)
         {
             if (It->Value && It->Value->bFromSDF)
             {
+                // Track meshes to preserve
+                SavedAtomMeshes.Append(It->Value->AtomMeshes);
+                SavedBondMeshes.Append(It->Value->BondMeshes);
                 SavedSDFLigands.Add(It->Key, It->Value);
                 It.RemoveCurrent();
             }
@@ -661,6 +685,11 @@ void APDBViewer::ParsePDB(const FString &Content)
 
     ClearResidueMap();
     ClearLigandMap();
+
+    // Clear global mesh arrays but preserve SDF ligand meshes
+    AllAtomMeshes = MoveTemp(SavedAtomMeshes);
+    AllBondMeshes = MoveTemp(SavedBondMeshes);
+
     ChainIDs.Empty();
     ClearTrimCache();  // OPTIMIZATION #15: Clear trim cache for new parse
 
@@ -751,12 +780,17 @@ void APDBViewer::ParseMMCIF(const FString &Content)
 
     // Preserve SDF-loaded ligands across mmCIF reload (they would be destroyed by ClearLigandMap)
     TMap<FString, FLigandInfo*> SavedSDFLigands;
+    TArray<UStaticMeshComponent*> SavedAtomMeshes;
+    TArray<UStaticMeshComponent*> SavedBondMeshes;
     {
         auto It = LigandMap.CreateIterator();
         while (It)
         {
             if (It->Value && It->Value->bFromSDF)
             {
+                // Track meshes to preserve
+                SavedAtomMeshes.Append(It->Value->AtomMeshes);
+                SavedBondMeshes.Append(It->Value->BondMeshes);
                 SavedSDFLigands.Add(It->Key, It->Value);
                 It.RemoveCurrent();
             }
@@ -769,6 +803,11 @@ void APDBViewer::ParseMMCIF(const FString &Content)
 
     ClearResidueMap();
     ClearLigandMap();
+
+    // Clear global mesh arrays but preserve SDF ligand meshes
+    AllAtomMeshes = MoveTemp(SavedAtomMeshes);
+    AllBondMeshes = MoveTemp(SavedBondMeshes);
+
     ChainIDs.Empty();
     ClearTrimCache();  // OPTIMIZATION #15: Clear trim cache for new parse
 
@@ -1547,7 +1586,7 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
 
             for (auto *Mesh : LigInfo->AtomMeshes)
             {
-                if (Mesh)
+                if (IsValid(Mesh))
                     Mesh->SetVisibility(LigInfo->bIsVisible);
             }
 
@@ -2059,13 +2098,29 @@ TArray<UPDBTreeNode*> APDBViewer::GetChainNodes()
 
     for (const FString& ChainID : SortedChains)
     {
-        // OPTIMIZATION #9: Use FStringBuilder instead of Printf
-        FString DisplayName = ChainID == TEXT("_")
-                                  ? TEXT("Chain (No ID)")
-                                  : TStringBuilder<64>().Append(TEXT("Chain ")).Append(ChainID).ToString();
+        // Use unique cache key for chain nodes
+        FString CacheKey = TStringBuilder<64>().Append(TEXT("CHAIN_")).Append(ChainID).ToString();
 
-        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
-        Node->InitializeWithType(DisplayName, ChainID, EPDBNodeType::Chain, ChainID);
+        // Check cache first to prevent GC issues
+        UPDBTreeNode** CachedNode = TreeNodeCache.Find(CacheKey);
+        UPDBTreeNode* Node = nullptr;
+
+        if (CachedNode && IsValid(*CachedNode))
+        {
+            Node = *CachedNode;
+        }
+        else
+        {
+            // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+            FString DisplayName = ChainID == TEXT("_")
+                                      ? TEXT("Chain (No ID)")
+                                      : TStringBuilder<64>().Append(TEXT("Chain ")).Append(ChainID).ToString();
+
+            Node = NewObject<UPDBTreeNode>(this);
+            Node->InitializeWithType(DisplayName, ChainID, EPDBNodeType::Chain, ChainID);
+            TreeNodeCache.Add(CacheKey, Node);
+        }
+
         Nodes.Add(Node);
     }
 
@@ -2102,16 +2157,30 @@ TArray<UPDBTreeNode*> APDBViewer::GetResidueNodesForChain(const FString& ChainID
     for (const auto& Pair : ChainResidues)
     {
         const FResidueInfo* Info = Pair.Value;
-        // OPTIMIZATION #9: Use FStringBuilder instead of Printf
-        FString DisplayName = TStringBuilder<64>()
-            .Append(Info->ResidueName)
-            .Append(TEXT(" "))
-            .Append(Info->ResidueSeq)
-            .ToString();
 
-        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
-        Node->InitializeWithType(DisplayName, Pair.Key, EPDBNodeType::Residue, ChainID);
-        Node->bIsVisible = Info->bIsVisible;
+        // Check cache first to prevent GC issues
+        UPDBTreeNode** CachedNode = TreeNodeCache.Find(Pair.Key);
+        UPDBTreeNode* Node = nullptr;
+
+        if (CachedNode && IsValid(*CachedNode))
+        {
+            Node = *CachedNode;
+            Node->bIsVisible = Info->bIsVisible;
+        }
+        else
+        {
+            // OPTIMIZATION #9: Use FStringBuilder instead of Printf
+            FString DisplayName = TStringBuilder<64>()
+                .Append(Info->ResidueName)
+                .Append(TEXT(" "))
+                .Append(Info->ResidueSeq)
+                .ToString();
+
+            Node = NewObject<UPDBTreeNode>(this);
+            Node->InitializeWithType(DisplayName, Pair.Key, EPDBNodeType::Residue, ChainID);
+            Node->bIsVisible = Info->bIsVisible;
+            TreeNodeCache.Add(Pair.Key, Node);
+        }
 
         Nodes.Add(Node);
     }
@@ -2145,9 +2214,22 @@ TArray<UPDBTreeNode*> APDBViewer::GetWaterNodesForChain(const FString& ChainID)
         if (KeyChain != ChainID)
             continue;
 
-        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
-        Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Water, ChainID);
-        Node->bIsVisible = Info->bIsVisible;
+        // Check cache first to prevent GC issues
+        UPDBTreeNode** CachedNode = TreeNodeCache.Find(Key);
+        UPDBTreeNode* Node = nullptr;
+
+        if (CachedNode && IsValid(*CachedNode))
+        {
+            Node = *CachedNode;
+            Node->bIsVisible = Info->bIsVisible;
+        }
+        else
+        {
+            Node = NewObject<UPDBTreeNode>(this);
+            Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Water, ChainID);
+            Node->bIsVisible = Info->bIsVisible;
+            TreeNodeCache.Add(Key, Node);
+        }
 
         Nodes.Add(Node);
     }
@@ -2203,14 +2285,28 @@ TArray<UPDBTreeNode*> APDBViewer::GetLigandNodesForChain(const FString& ChainID)
         }
 
         MatchCount++;
-        
-        UPDBTreeNode* Node = NewObject<UPDBTreeNode>(this);
-        Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Ligand, ChainID);
-        Node->bIsVisible = Info->bIsVisible;
+
+        // Check cache first to prevent GC issues
+        UPDBTreeNode** CachedNode = TreeNodeCache.Find(Key);
+        UPDBTreeNode* Node = nullptr;
+
+        if (CachedNode && IsValid(*CachedNode))
+        {
+            Node = *CachedNode;
+            // Update visibility in case it changed
+            Node->bIsVisible = Info->bIsVisible;
+        }
+        else
+        {
+            Node = NewObject<UPDBTreeNode>(this);
+            Node->InitializeWithType(Info->LigandName, Key, EPDBNodeType::Ligand, ChainID);
+            Node->bIsVisible = Info->bIsVisible;
+            TreeNodeCache.Add(Key, Node);
+        }
 
         Nodes.Add(Node);
     }
-    
+
     UE_LOG(LogTemp, Warning, TEXT("GetLigandNodesForChain summary for '%s':"), *ChainID);
     UE_LOG(LogTemp, Warning, TEXT("  - Total keys: %d"), Keys.Num());
     UE_LOG(LogTemp, Warning, TEXT("  - Waters skipped: %d"), WaterSkipCount);
@@ -2994,7 +3090,7 @@ void APDBViewer::SetMeshVisibilityBatched(TArray<UStaticMeshComponent*>& Meshes,
     // Batch visibility updates to avoid redundant state changes
     for (UStaticMeshComponent* Mesh : Meshes)
     {
-        if (Mesh && Mesh->IsVisible() != bVisible)
+        if (IsValid(Mesh) && Mesh->IsVisible() != bVisible)
         {
             Mesh->SetVisibility(bVisible);
         }
@@ -3063,9 +3159,9 @@ void APDBViewer::ClearCurrentStructure()
     DestroyMeshComponents(InteractionMeshes);
     DetectedInteractions.Empty();
 
-    // Clear general atom/bond meshes
-    DestroyMeshComponents(AllAtomMeshes);
-    DestroyMeshComponents(AllBondMeshes);
+    // Clear general atom/bond mesh arrays (meshes already destroyed by ClearResidueMap/ClearLigandMap)
+    AllAtomMeshes.Empty();
+    AllBondMeshes.Empty();
 }
 // ===== LIGAND ATOM LIGHTING IMPLEMENTATION =====
 

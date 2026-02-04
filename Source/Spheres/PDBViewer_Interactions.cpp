@@ -402,22 +402,22 @@ void APDBViewer::DetectHydrophobicInteractions(bool bProteinProtein, bool bProte
     {
         TArray<FString> ResKeys;
         ResidueMap.GetKeys(ResKeys);
-        
+
         for (int32 i = 0; i < ResKeys.Num(); ++i)
         {
             FResidueInfo* Res1 = ResidueMap[ResKeys[i]];
             if (!Res1 || !Res1->bIsVisible || !IsHydrophobic(Res1->ResidueName)) continue;
-            
+
             FVector Center1 = GetResidueCenterOfMass(Res1);
-            
+
             for (int32 j = i + 1; j < ResKeys.Num(); ++j)
             {
                 FResidueInfo* Res2 = ResidueMap[ResKeys[j]];
                 if (!Res2 || !Res2->bIsVisible || !IsHydrophobic(Res2->ResidueName)) continue;
-                
+
                 FVector Center2 = GetResidueCenterOfMass(Res2);
                 float Distance = FVector::Dist(Center1, Center2);
-                
+
                 if (Distance <= HydrophobicMaxDistance)
                 {
                     FMolecularInteraction Interaction;
@@ -431,13 +431,121 @@ void APDBViewer::DetectHydrophobicInteractions(bool bProteinProtein, bool bProte
                     Interaction.Distance = Distance;
                     Interaction.Energy = -0.5f - (HydrophobicMaxDistance - Distance) * 1.0f;
                     Interaction.bIsProteinLigand = false;
-                    
+
                     DetectedInteractions.Add(Interaction);
                 }
             }
         }
     }
-    
+
+    // Protein-Ligand hydrophobic interactions
+    if (bProteinLigand)
+    {
+        TArray<FString> ResKeys, LigKeys;
+        ResidueMap.GetKeys(ResKeys);
+        LigandMap.GetKeys(LigKeys);
+
+        for (const FString& ResKey : ResKeys)
+        {
+            FResidueInfo* Res = ResidueMap[ResKey];
+            if (!Res || !Res->bIsVisible || !IsHydrophobic(Res->ResidueName)) continue;
+
+            // Get hydrophobic atoms from residue (sidechain carbons)
+            TArray<FVector> ResHydrophobicAtoms;
+            for (int32 i = 0; i < Res->AtomElements.Num(); ++i)
+            {
+                // Carbon atoms in hydrophobic sidechains
+                if (Res->AtomElements[i] == TEXT("C") && i < Res->AtomNames.Num())
+                {
+                    const FString& AtomName = Res->AtomNames[i];
+                    // Skip backbone atoms (CA, C)
+                    if (AtomName != TEXT("CA") && AtomName != TEXT("C"))
+                    {
+                        ResHydrophobicAtoms.Add(Res->AtomPositions[i]);
+                    }
+                }
+            }
+
+            if (ResHydrophobicAtoms.Num() == 0)
+                continue;
+
+            for (const FString& LigKey : LigKeys)
+            {
+                FLigandInfo* Lig = LigandMap[LigKey];
+                if (!Lig || !Lig->bIsVisible || Lig->bIsWater) continue;
+
+                // Get hydrophobic atoms from ligand (carbon atoms not bonded to heteroatoms)
+                TArray<TPair<int32, FVector>> LigHydrophobicAtoms;
+                for (int32 i = 0; i < Lig->AtomElements.Num(); ++i)
+                {
+                    if (Lig->AtomElements[i] == TEXT("C"))
+                    {
+                        // Check if this carbon is bonded to N, O, S (not purely hydrophobic)
+                        bool bBondedToHeteroatom = false;
+                        for (const auto& Bond : Lig->BondPairs)
+                        {
+                            int32 OtherAtom = -1;
+                            if (Bond.Key == i) OtherAtom = Bond.Value;
+                            else if (Bond.Value == i) OtherAtom = Bond.Key;
+
+                            if (OtherAtom >= 0 && OtherAtom < Lig->AtomElements.Num())
+                            {
+                                const FString& OtherElem = Lig->AtomElements[OtherAtom];
+                                if (OtherElem == TEXT("N") || OtherElem == TEXT("O") || OtherElem == TEXT("S"))
+                                {
+                                    bBondedToHeteroatom = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Only include carbons bonded only to C/H (truly hydrophobic)
+                        if (!bBondedToHeteroatom)
+                        {
+                            LigHydrophobicAtoms.Add(TPair<int32, FVector>(i, Lig->AtomPositions[i]));
+                        }
+                    }
+                }
+
+                if (LigHydrophobicAtoms.Num() == 0)
+                    continue;
+
+                // Check distances between hydrophobic atoms
+                for (const FVector& ResAtom : ResHydrophobicAtoms)
+                {
+                    for (const auto& LigAtom : LigHydrophobicAtoms)
+                    {
+                        float Distance = FVector::Dist(ResAtom, LigAtom.Value);
+
+                        if (Distance <= HydrophobicMaxDistance)
+                        {
+                            FMolecularInteraction Interaction;
+                            Interaction.Type = EInteractionType::Hydrophobic;
+                            Interaction.Residue1 = ResKey;
+                            Interaction.Residue2 = LigKey;
+                            Interaction.Atom1 = TEXT("C");
+                            Interaction.Atom2 = (LigAtom.Key < Lig->AtomNames.Num()) ? Lig->AtomNames[LigAtom.Key] : TEXT("C");
+                            Interaction.Position1 = ResAtom;
+                            Interaction.Position2 = LigAtom.Value;
+                            Interaction.Distance = Distance;
+                            Interaction.Energy = -0.3f - (HydrophobicMaxDistance - Distance) * 0.5f;
+                            Interaction.bIsProteinLigand = true;
+
+                            DetectedInteractions.Add(Interaction);
+
+                            UE_LOG(LogTemp, Log, TEXT("Hydrophobic (Prot-Lig): %s <-> %s | Dist: %.2f A"),
+                                   *ResKey, *LigKey, Distance);
+
+                            // Only report one interaction per residue-ligand pair to avoid spam
+                            goto NextLigand;
+                        }
+                    }
+                }
+                NextLigand:;
+            }
+        }
+    }
+
     int32 HydrophobicFound = DetectedInteractions.Num() - InitialCount;
     UE_LOG(LogTemp, Log, TEXT("Found %d hydrophobic interactions"), HydrophobicFound);
 }
@@ -771,49 +879,211 @@ bool APDBViewer::GetAromaticRingCenter(FResidueInfo* ResInfo, FVector& OutCenter
 // OPTIMIZED: Non-const to allow caching
 bool APDBViewer::GetAromaticRingCenter(FLigandInfo* LigInfo, FVector& OutCenter, FVector& OutNormal)
 {
-    if (!LigInfo || LigInfo->AtomPositions.Num() < 3)
+    if (!LigInfo || LigInfo->AtomPositions.Num() < 5)
         return false;
-    
+
     // Check cache first
     if (LigInfo->bAromaticCenterCached)
     {
+        // Cache stores false result as zero normal
+        if (LigInfo->CachedAromaticNormal.IsNearlyZero())
+            return false;
         OutCenter = LigInfo->CachedAromaticCenter;
         OutNormal = LigInfo->CachedAromaticNormal;
         return true;
     }
-    
-    // Simplified: Use all carbon atoms as potential ring atoms
-    TArray<FVector> RingAtoms;
-    for (int32 i = 0; i < LigInfo->AtomElements.Num(); ++i)
+
+    // Build adjacency list from bond pairs
+    TMap<int32, TArray<int32>> Adjacency;
+    TSet<int32> AromaticAtoms;
+
+    for (int32 i = 0; i < LigInfo->BondPairs.Num(); ++i)
     {
-        if (LigInfo->AtomElements[i] == TEXT("C"))
-            RingAtoms.Add(LigInfo->AtomPositions[i]);
+        int32 A1 = LigInfo->BondPairs[i].Key;
+        int32 A2 = LigInfo->BondPairs[i].Value;
+        Adjacency.FindOrAdd(A1).Add(A2);
+        Adjacency.FindOrAdd(A2).Add(A1);
+
+        // Bond order 4 = aromatic bond
+        if (i < LigInfo->BondOrders.Num() && LigInfo->BondOrders[i] == 4)
+        {
+            AromaticAtoms.Add(A1);
+            AromaticAtoms.Add(A2);
+        }
     }
-    
-    if (RingAtoms.Num() < 3)
+
+    // If we have explicit aromatic bonds, use those atoms
+    if (AromaticAtoms.Num() >= 5)
+    {
+        TArray<FVector> RingPositions;
+        for (int32 Idx : AromaticAtoms)
+        {
+            if (Idx < LigInfo->AtomPositions.Num())
+                RingPositions.Add(LigInfo->AtomPositions[Idx]);
+        }
+
+        if (RingPositions.Num() >= 5)
+        {
+            // Calculate center
+            OutCenter = FVector::ZeroVector;
+            for (const FVector& Pos : RingPositions)
+                OutCenter += Pos;
+            OutCenter /= RingPositions.Num();
+
+            // Calculate normal using SVD-like approach (find best-fit plane)
+            // Simplified: use first 3 non-collinear points
+            for (int32 i = 0; i < RingPositions.Num() - 2; ++i)
+            {
+                FVector V1 = RingPositions[i + 1] - RingPositions[i];
+                FVector V2 = RingPositions[i + 2] - RingPositions[i];
+                FVector N = FVector::CrossProduct(V1, V2);
+                if (N.SizeSquared() > 0.01f)
+                {
+                    OutNormal = N.GetSafeNormal();
+                    break;
+                }
+            }
+
+            if (OutNormal.IsNearlyZero())
+                OutNormal = FVector::UpVector;
+
+            // Cache and return
+            LigInfo->CachedAromaticCenter = OutCenter;
+            LigInfo->CachedAromaticNormal = OutNormal;
+            LigInfo->bAromaticCenterCached = true;
+            return true;
+        }
+    }
+
+    // No aromatic bonds found - try to find 5 or 6 membered rings of C/N atoms
+    // Use simple DFS to find rings
+    TArray<int32> BestRing;
+
+    for (const auto& Pair : Adjacency)
+    {
+        int32 StartAtom = Pair.Key;
+
+        // Only start from C or N atoms
+        if (StartAtom >= LigInfo->AtomElements.Num())
+            continue;
+        const FString& Elem = LigInfo->AtomElements[StartAtom];
+        if (Elem != TEXT("C") && Elem != TEXT("N"))
+            continue;
+
+        // DFS to find rings of size 5 or 6
+        TArray<int32> Path;
+        Path.Add(StartAtom);
+        TSet<int32> Visited;
+        Visited.Add(StartAtom);
+
+        TFunction<bool(int32, int32)> FindRing = [&](int32 Current, int32 Depth) -> bool
+        {
+            if (Depth > 6)
+                return false;
+
+            const TArray<int32>* Neighbors = Adjacency.Find(Current);
+            if (!Neighbors)
+                return false;
+
+            for (int32 Next : *Neighbors)
+            {
+                if (Next == StartAtom && Depth >= 5)
+                {
+                    // Found a ring!
+                    if (BestRing.Num() == 0 || (Path.Num() == 6 && BestRing.Num() != 6))
+                        BestRing = Path;
+                    return true;
+                }
+
+                if (!Visited.Contains(Next) && Next < LigInfo->AtomElements.Num())
+                {
+                    const FString& NextElem = LigInfo->AtomElements[Next];
+                    if (NextElem == TEXT("C") || NextElem == TEXT("N"))
+                    {
+                        Path.Add(Next);
+                        Visited.Add(Next);
+                        FindRing(Next, Depth + 1);
+                        Path.Pop();
+                        Visited.Remove(Next);
+                    }
+                }
+            }
+            return false;
+        };
+
+        FindRing(StartAtom, 1);
+
+        // If we found a 6-membered ring, that's ideal for aromatics
+        if (BestRing.Num() == 6)
+            break;
+    }
+
+    // Check if we found a valid ring
+    if (BestRing.Num() < 5)
+    {
+        // Cache negative result
+        LigInfo->CachedAromaticCenter = FVector::ZeroVector;
+        LigInfo->CachedAromaticNormal = FVector::ZeroVector;
+        LigInfo->bAromaticCenterCached = true;
         return false;
-    
+    }
+
+    // Verify the ring is roughly planar
+    TArray<FVector> RingPositions;
+    for (int32 Idx : BestRing)
+    {
+        if (Idx < LigInfo->AtomPositions.Num())
+            RingPositions.Add(LigInfo->AtomPositions[Idx]);
+    }
+
+    if (RingPositions.Num() < 5)
+    {
+        LigInfo->CachedAromaticCenter = FVector::ZeroVector;
+        LigInfo->CachedAromaticNormal = FVector::ZeroVector;
+        LigInfo->bAromaticCenterCached = true;
+        return false;
+    }
+
+    // Calculate center
     OutCenter = FVector::ZeroVector;
-    for (const FVector& Pos : RingAtoms)
+    for (const FVector& Pos : RingPositions)
         OutCenter += Pos;
-    OutCenter /= RingAtoms.Num();
-    
-    if (RingAtoms.Num() >= 3)
+    OutCenter /= RingPositions.Num();
+
+    // Calculate normal
+    FVector V1 = RingPositions[1] - RingPositions[0];
+    FVector V2 = RingPositions[2] - RingPositions[0];
+    OutNormal = FVector::CrossProduct(V1, V2).GetSafeNormal();
+
+    if (OutNormal.IsNearlyZero())
     {
-        FVector V1 = RingAtoms[1] - RingAtoms[0];
-        FVector V2 = RingAtoms[2] - RingAtoms[0];
-        OutNormal = FVector::CrossProduct(V1, V2).GetSafeNormal();
+        LigInfo->CachedAromaticCenter = FVector::ZeroVector;
+        LigInfo->CachedAromaticNormal = FVector::ZeroVector;
+        LigInfo->bAromaticCenterCached = true;
+        return false;
     }
-    else
+
+    // Check planarity - all atoms should be within ~0.5 Angstrom of the plane
+    float MaxDeviation = 0.0f;
+    for (const FVector& Pos : RingPositions)
     {
-        OutNormal = FVector::UpVector;
+        float Deviation = FMath::Abs(FVector::DotProduct(Pos - OutCenter, OutNormal));
+        MaxDeviation = FMath::Max(MaxDeviation, Deviation);
     }
-    
-    // Cache the results
+
+    // If not planar enough, not aromatic
+    if (MaxDeviation > 0.5f)
+    {
+        LigInfo->CachedAromaticCenter = FVector::ZeroVector;
+        LigInfo->CachedAromaticNormal = FVector::ZeroVector;
+        LigInfo->bAromaticCenterCached = true;
+        return false;
+    }
+
+    // Cache and return
     LigInfo->CachedAromaticCenter = OutCenter;
     LigInfo->CachedAromaticNormal = OutNormal;
     LigInfo->bAromaticCenterCached = true;
-    
     return true;
 }
 

@@ -691,7 +691,7 @@ protected:
     int32 CurrentLODLevel = 0;
 
     // Forced LOD level (-1 = automatic, 0-3 = forced level)
-    int32 ForcedLODLevel = -1;
+    int32 ForcedLODLevel = 0;
 
     // Cached structure center for LOD distance calculations
     FVector StructureCenter;

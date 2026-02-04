@@ -11,10 +11,17 @@
 void UPDBTreeEntryWidget::NativeOnListItemObjectSet(UObject* ListItemObject)
 {
     IUserObjectListEntry::NativeOnListItemObjectSet(ListItemObject);
-    
+
     // CRITICAL: Reset expansion state - widgets are recycled!
     bIsExpanded = false;
-    
+
+    // Validate object before casting - prevents crash on invalid/garbage collected objects
+    if (!IsValid(ListItemObject))
+    {
+        CurrentNode = nullptr;
+        return;
+    }
+
     // Cast to our node type
     CurrentNode = Cast<UPDBTreeNode>(ListItemObject);
     if (!CurrentNode)
