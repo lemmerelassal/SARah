@@ -491,6 +491,10 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Interactions")
     bool bAutoCalculateInteractions = false;
 
+    // Enable/disable file caching (caches to Content/Cache/CIF directory)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Cache")
+    bool bEnableFileCache = true;
+
     UPROPERTY() TArray<UStaticMeshComponent*> OverlapMarkers;
 
     virtual void BeginPlay() override;
@@ -521,6 +525,17 @@ protected:
     
     void FetchAndDisplayStructure(const FString& PDB_ID);
     void FetchFileAsync(const FString& URL, TFunction<void(bool, const FString&)> Callback);
+
+    // Cache management functions
+    FString GetCacheDirectory() const;
+    FString GetCachedFilePath(const FString& PDB_ID, const FString& Extension) const;
+    bool LoadFromCache(const FString& PDB_ID, const FString& Extension, FString& OutContent);
+    bool SaveToCache(const FString& PDB_ID, const FString& Extension, const FString& Content);
+
+    // Component CIF file management
+    void FetchComponentCIF(const FString& ComponentName, TFunction<void(bool, const FString&)> Callback);
+    FString GetComponentCIFURL(const FString& ComponentName) const;
+    void ParseComponentBonds(const FString& Content, const FString& ComponentName, TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>>& OutComponentBonds);
     void ParsePDB(const FString& FileContent);
     void ParseMMCIF(const FString& FileContent);
     void CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FVector>>& ResidueAtoms, const TMap<FString, FResidueMetadata>& Metadata);

@@ -5,6 +5,9 @@
 #include "Interfaces/IHttpResponse.h"
 #include "HydrogenGenerator.h"
 #include "Components/StaticMeshComponent.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "HAL/PlatformFileManager.h"
 
 namespace PDB
 {
@@ -17,13 +20,46 @@ namespace PDB
 void APDBViewer::FetchAndDisplayStructure(const FString &ID)
 {
     CurrentStructureID = ID;
+
+    // Try loading from cache first
+    FString CachedContent;
+    if (LoadFromCache(ID, TEXT("pdb"), CachedContent))
+    {
+        ParsePDB(CachedContent);
+        return;
+    }
+
+    if (LoadFromCache(ID, TEXT("cif"), CachedContent))
+    {
+        ParseMMCIF(CachedContent);
+        return;
+    }
+
+    // Not in cache, fetch from web
+    UE_LOG(LogTemp, Log, TEXT("Downloading %s from RCSB..."), *ID);
+
     // OPTIMIZATION #9: Use FStringBuilder instead of Printf
     FString URL = TStringBuilder<256>().Append(TEXT("https://files.rcsb.org/download/")).Append(ID).Append(TEXT(".pdb")).ToString();
     FetchFileAsync(URL, [this, ID](bool bOK, const FString &Content)
                    {
-        if (bOK) ParsePDB(Content);
-        else FetchFileAsync(TStringBuilder<256>().Append(TEXT("https://files.rcsb.org/download/")).Append(ID).Append(TEXT(".cif")).ToString(),
-            [this](bool bOK2, const FString& C) { if (bOK2) ParseMMCIF(C); }); });
+        if (bOK)
+        {
+            SaveToCache(ID, TEXT("pdb"), Content);
+            ParsePDB(Content);
+        }
+        else
+        {
+            FetchFileAsync(TStringBuilder<256>().Append(TEXT("https://files.rcsb.org/download/")).Append(ID).Append(TEXT(".cif")).ToString(),
+                [this, ID](bool bOK2, const FString& C)
+                {
+                    if (bOK2)
+                    {
+                        SaveToCache(ID, TEXT("cif"), C);
+                        ParseMMCIF(C);
+                    }
+                });
+        }
+    });
 }
 
 void APDBViewer::FetchFileAsync(const FString &URL, TFunction<void(bool, const FString &)> CB)
@@ -34,6 +70,192 @@ void APDBViewer::FetchFileAsync(const FString &URL, TFunction<void(bool, const F
     Req->OnProcessRequestComplete().BindLambda([CB](FHttpRequestPtr R, FHttpResponsePtr Resp, bool bOK)
                                                { CB(bOK && Resp.IsValid() && Resp->GetResponseCode() == 200, bOK ? Resp->GetContentAsString() : TEXT("")); });
     Req->ProcessRequest();
+}
+
+FString APDBViewer::GetCacheDirectory() const
+{
+    return FPaths::ProjectContentDir() / TEXT("Cache") / TEXT("CIF");
+}
+
+FString APDBViewer::GetCachedFilePath(const FString& PDB_ID, const FString& Extension) const
+{
+    return GetCacheDirectory() / (PDB_ID + TEXT(".") + Extension);
+}
+
+bool APDBViewer::LoadFromCache(const FString& PDB_ID, const FString& Extension, FString& OutContent)
+{
+    if (!bEnableFileCache)
+        return false;
+
+    FString CachePath = GetCachedFilePath(PDB_ID, Extension);
+
+    if (FFileHelper::LoadFileToString(OutContent, *CachePath))
+    {
+        UE_LOG(LogTemp, Log, TEXT("Loaded %s from cache: %s"), *PDB_ID, *CachePath);
+        return true;
+    }
+
+    return false;
+}
+
+bool APDBViewer::SaveToCache(const FString& PDB_ID, const FString& Extension, const FString& Content)
+{
+    if (!bEnableFileCache)
+        return false;
+
+    FString CacheDir = GetCacheDirectory();
+    FString CachePath = GetCachedFilePath(PDB_ID, Extension);
+
+    // Create cache directory if it doesn't exist
+    IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+    if (!PlatformFile.DirectoryExists(*CacheDir))
+    {
+        if (!PlatformFile.CreateDirectoryTree(*CacheDir))
+        {
+            UE_LOG(LogTemp, Error, TEXT("Failed to create cache directory: %s"), *CacheDir);
+            return false;
+        }
+    }
+
+    if (FFileHelper::SaveStringToFile(Content, *CachePath))
+    {
+        UE_LOG(LogTemp, Log, TEXT("Saved %s to cache: %s"), *PDB_ID, *CachePath);
+        return true;
+    }
+
+    UE_LOG(LogTemp, Error, TEXT("Failed to save %s to cache"), *PDB_ID);
+    return false;
+}
+
+FString APDBViewer::GetComponentCIFURL(const FString& ComponentName) const
+{
+    if (ComponentName.IsEmpty())
+        return TEXT("");
+
+    // Component CIF files are organized by first letter in lowercase
+    // URL format: https://files.wwpdb.org/pub/pdb/data/monomers/[first_letter]/[COMPONENT].cif
+    FString FirstLetter = ComponentName.Left(1).ToLower();
+
+    return TStringBuilder<256>()
+        .Append(TEXT("https://files.wwpdb.org/pub/pdb/data/monomers/"))
+        .Append(FirstLetter)
+        .Append(TEXT("/"))
+        .Append(ComponentName)
+        .Append(TEXT(".cif"))
+        .ToString();
+}
+
+void APDBViewer::FetchComponentCIF(const FString& ComponentName, TFunction<void(bool, const FString&)> Callback)
+{
+    if (ComponentName.IsEmpty())
+    {
+        Callback(false, TEXT(""));
+        return;
+    }
+
+    // Try loading from cache first (cache in Components subdirectory)
+    FString CachePath = GetCacheDirectory() / TEXT("Components") / (ComponentName + TEXT(".cif"));
+    FString CachedContent;
+
+    if (FFileHelper::LoadFileToString(CachedContent, *CachePath))
+    {
+        UE_LOG(LogTemp, Log, TEXT("Loaded component %s from cache"), *ComponentName);
+        Callback(true, CachedContent);
+        return;
+    }
+
+    // Not in cache, fetch from web
+    FString URL = GetComponentCIFURL(ComponentName);
+    UE_LOG(LogTemp, Log, TEXT("Fetching component CIF: %s"), *URL);
+
+    FetchFileAsync(URL, [this, ComponentName, CachePath, Callback](bool bOK, const FString& Content)
+    {
+        if (bOK && !Content.IsEmpty())
+        {
+            // Save to cache
+            FString CacheDir = FPaths::GetPath(CachePath);
+            IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+
+            if (!PlatformFile.DirectoryExists(*CacheDir))
+            {
+                PlatformFile.CreateDirectoryTree(*CacheDir);
+            }
+
+            if (FFileHelper::SaveStringToFile(Content, *CachePath))
+            {
+                UE_LOG(LogTemp, Log, TEXT("Saved component %s to cache"), *ComponentName);
+            }
+
+            Callback(true, Content);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Failed to fetch component CIF for %s"), *ComponentName);
+            Callback(false, TEXT(""));
+        }
+    });
+}
+
+void APDBViewer::ParseComponentBonds(const FString& Content, const FString& ComponentName, TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>>& OutComponentBonds)
+{
+    TArray<FString> Lines;
+    Content.ParseIntoArrayLines(Lines);
+
+    bool bInChemCompBond = false;
+    TArray<FString> BondHeaders;
+    int32 Atom1Idx = -1, Atom2Idx = -1, OrderIdx = -1;
+
+    for (const FString& Line : Lines)
+    {
+        if (Line.StartsWith(TEXT("loop_")))
+        {
+            bInChemCompBond = false;
+            BondHeaders.Empty();
+            Atom1Idx = Atom2Idx = OrderIdx = -1;
+            continue;
+        }
+
+        if (Line.StartsWith(TEXT("_chem_comp_bond.")))
+        {
+            bInChemCompBond = true;
+            int32 Idx = BondHeaders.Add(Line);
+
+            if (Line.Contains(TEXT("atom_id_1")))
+                Atom1Idx = Idx;
+            else if (Line.Contains(TEXT("atom_id_2")))
+                Atom2Idx = Idx;
+            else if (Line.Contains(TEXT("value_order")))
+                OrderIdx = Idx;
+
+            continue;
+        }
+
+        if (bInChemCompBond && !Line.StartsWith(TEXT("_")) && !Line.StartsWith(TEXT("#")) && !Line.IsEmpty())
+        {
+            if (Atom1Idx < 0 || Atom2Idx < 0)
+                continue;
+
+            TArray<FString> Tokens;
+            Line.ParseIntoArrayWS(Tokens);
+
+            if (Tokens.Num() <= FMath::Max(Atom1Idx, Atom2Idx))
+                continue;
+
+            FString Atom1 = Tokens[Atom1Idx].TrimStartAndEnd();
+            FString Atom2 = Tokens[Atom2Idx].TrimStartAndEnd();
+            int32 Order = (OrderIdx >= 0 && Tokens.IsValidIndex(OrderIdx))
+                              ? ParseBondOrder(Tokens[OrderIdx])
+                              : 1;
+
+            // Store bond for this component type
+            OutComponentBonds.FindOrAdd(ComponentName).Add(TPair<TPair<FString, FString>, int32>(
+                TPair<FString, FString>(Atom1, Atom2), Order));
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("Parsed %d bonds for component %s"),
+           OutComponentBonds.Contains(ComponentName) ? OutComponentBonds[ComponentName].Num() : 0,
+           *ComponentName);
 }
 
 void APDBViewer::ParsePDB(const FString &Content)
@@ -320,6 +542,16 @@ void APDBViewer::ParseMMCIF(const FString &Content)
 
 void APDBViewer::FetchStructureBondsFromCIF(const FString &StructureID)
 {
+    // Try loading from cache first
+    FString CachedContent;
+    if (LoadFromCache(StructureID, TEXT("cif"), CachedContent))
+    {
+        UE_LOG(LogTemp, Log, TEXT("Loaded bond information from cache"));
+        ParseStructureBondsFromCIF(CachedContent);
+        return;
+    }
+
+    // Not in cache, fetch from web
     // OPTIMIZATION #9: Use FStringBuilder instead of Printf
     FString URL = TStringBuilder<256>()
         .Append(TEXT("https://files.rcsb.org/download/"))
@@ -329,11 +561,12 @@ void APDBViewer::FetchStructureBondsFromCIF(const FString &StructureID)
 
     UE_LOG(LogTemp, Log, TEXT("Fetching bond information from mmCIF: %s"), *URL);
 
-    FetchFileAsync(URL, [this](bool bOK, const FString &Content)
+    FetchFileAsync(URL, [this, StructureID](bool bOK, const FString &Content)
                    {
         if (bOK)
         {
             UE_LOG(LogTemp, Log, TEXT("Successfully fetched mmCIF bond data"));
+            SaveToCache(StructureID, TEXT("cif"), Content);
             ParseStructureBondsFromCIF(Content);
         }
         else
@@ -410,25 +643,106 @@ void APDBViewer::ParseStructureBondsFromCIF(const FString &Content)
 
     UE_LOG(LogTemp, Log, TEXT("Parsed bond data for %d component types from mmCIF"), ComponentBonds.Num());
 
-    // Apply bonds to all residues and ligands (includes peptide bonds)
-    ApplyBondsToResidues(ComponentBonds);
+    // Identify components that need bond data
+    TSet<FString> NeededComponents;
 
-    // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
-    RebuildLigandChainCache();
-
-    // Now broadcast events after bonds are applied
-    OnResiduesLoaded.Broadcast();
-    OnLigandsLoaded.Broadcast();
-
-    // Optionally calculate interactions automatically if enabled
-    if (bAutoCalculateInteractions)
+    // Check residues
+    for (const auto& Pair : ResidueMap)
     {
-        UE_LOG(LogTemp, Log, TEXT("Auto-calculating interactions..."));
-        CalculateAllInteractions(true, true);
+        if (Pair.Value && !ComponentBonds.Contains(Pair.Value->ResidueName))
+        {
+            NeededComponents.Add(Pair.Value->ResidueName);
+        }
+    }
+
+    // Check ligands
+    for (const auto& Pair : LigandMap)
+    {
+        if (Pair.Value)
+        {
+            FString ResName = Pair.Value->LigandName;
+            int32 DashPos;
+            if (ResName.FindChar('-', DashPos))
+                ResName = ResName.Left(DashPos);
+
+            if (!ComponentBonds.Contains(ResName))
+            {
+                NeededComponents.Add(ResName);
+            }
+        }
+    }
+
+    // If we have missing components, fetch them
+    if (NeededComponents.Num() > 0 && bEnableFileCache)
+    {
+        UE_LOG(LogTemp, Log, TEXT("Fetching bond data for %d missing components..."), NeededComponents.Num());
+
+        // Create shared pointer to component bonds map that will be populated asynchronously
+        TSharedPtr<TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>>> SharedComponentBonds =
+            MakeShared<TMap<FString, TArray<TPair<TPair<FString, FString>, int32>>>>(ComponentBonds);
+
+        TSharedPtr<int32> PendingCount = MakeShared<int32>(NeededComponents.Num());
+
+        for (const FString& ComponentName : NeededComponents)
+        {
+            FetchComponentCIF(ComponentName, [this, SharedComponentBonds, PendingCount, ComponentName](bool bSuccess, const FString& Content)
+            {
+                if (bSuccess && !Content.IsEmpty())
+                {
+                    // Parse bonds from this component CIF
+                    ParseComponentBonds(Content, ComponentName, *SharedComponentBonds);
+                }
+
+                // Decrement pending count
+                (*PendingCount)--;
+
+                // If all components have been fetched, apply bonds
+                if (*PendingCount == 0)
+                {
+                    UE_LOG(LogTemp, Log, TEXT("All component CIF files processed. Applying bonds..."));
+
+                    // Apply bonds to all residues and ligands
+                    ApplyBondsToResidues(*SharedComponentBonds);
+
+                    // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
+                    RebuildLigandChainCache();
+
+                    // Now broadcast events after bonds are applied
+                    OnResiduesLoaded.Broadcast();
+                    OnLigandsLoaded.Broadcast();
+
+                    // Optionally calculate interactions automatically if enabled
+                    if (bAutoCalculateInteractions)
+                    {
+                        UE_LOG(LogTemp, Log, TEXT("Auto-calculating interactions..."));
+                        CalculateAllInteractions(true, true);
+                    }
+                }
+            });
+        }
     }
     else
     {
-        UE_LOG(LogTemp, Log, TEXT("Auto-calculate interactions is disabled. Call CalculateAllInteractions() manually if needed."));
+        // No missing components, apply bonds immediately
+        ApplyBondsToResidues(ComponentBonds);
+
+        // OPTIMIZATION: Rebuild ligand chain cache for faster lookups
+        RebuildLigandChainCache();
+
+        // Now broadcast events after bonds are applied
+        OnResiduesLoaded.Broadcast();
+        OnLigandsLoaded.Broadcast();
+
+        // Optionally calculate interactions automatically if enabled
+        if (bAutoCalculateInteractions)
+        {
+            UE_LOG(LogTemp, Log, TEXT("Auto-calculating interactions..."));
+            CalculateAllInteractions(true, true);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Log, TEXT("Auto-calculate interactions is disabled. Call CalculateAllInteractions() manually if needed."));
+        }
     }
 }
 
