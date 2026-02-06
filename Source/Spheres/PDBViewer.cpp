@@ -30,6 +30,9 @@ namespace PDB
     constexpr float BOND_OFFSET = 8.0f;
 }
 
+// Static backbone atoms set for efficient LOD checks
+const TSet<FString> APDBViewer::BackboneAtoms = {TEXT("CA"), TEXT("C"), TEXT("N"), TEXT("O")};
+
 // ===== OPTIMIZATION: String Parsing Helpers =====
 FString APDBViewer::GetChainFromLigandKey(const FString& Key)
 {

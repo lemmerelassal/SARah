@@ -184,8 +184,7 @@ bool APDBViewer::ShouldBondBeVisibleAtLOD(const FString& Atom1Name, const FStrin
 
     if (LODLevel == 1)
     {
-        // Medium detail - backbone bonds only
-        TSet<FString> BackboneAtoms = {TEXT("CA"), TEXT("C"), TEXT("N"), TEXT("O")};
+        // Medium detail - backbone bonds only (uses static set for performance)
         return BackboneAtoms.Contains(Atom1Name) && BackboneAtoms.Contains(Atom2Name);
     }
 

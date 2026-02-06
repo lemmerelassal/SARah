@@ -299,9 +299,10 @@ public:
     // File dialog helpers
     bool ShowFileDialog(bool bSave, FString& OutFilePath);
     bool ShowSDFFileDialog(FString& OutFilePath);
-    
+    bool ShowChainSelectionDialog(FString& OutChainID);
+
     // Parse SDF content (can be called directly if you have the content)
-    void ParseSDF(const FString& FileContent);
+    void ParseSDF(const FString& FileContent, const FString& TargetChain = TEXT(""));
     
     // Clear the tree node cache (call before repopulating tree after adding ligands)
     void ClearTreeNodeCache();
@@ -730,4 +731,7 @@ protected:
 
     // Check if bond should be visible at given LOD level
     bool ShouldBondBeVisibleAtLOD(const FString& Atom1Name, const FString& Atom2Name, int32 LODLevel) const;
+
+    // Static backbone atoms set for LOD checks (avoid repeated TSet creation)
+    static const TSet<FString> BackboneAtoms;
 };

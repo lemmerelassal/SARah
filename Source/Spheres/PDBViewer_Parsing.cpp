@@ -1020,7 +1020,7 @@ void APDBViewer::ApplyBondsToResidues(const TMap<FString, TArray<TPair<TPair<FSt
     }
 }
 
-void APDBViewer::ParseSDF(const FString &Content)
+void APDBViewer::ParseSDF(const FString &Content, const FString& TargetChain)
 {
     // Don't overwrite CurrentPDBContent — that stores the PDB/mmCIF source for save/reload
     // Don't clear ligand map - we want to ADD ligands, not replace them
@@ -1141,20 +1141,29 @@ void APDBViewer::ParseSDF(const FString &Content)
         }
 
         // Create proper ligand key in format "NAME_SEQ_CHAIN"
-        // Assign to first available chain, or create a default "SDF" chain
-        FString AssignedChain = TEXT("SDF");
-        if (ChainIDs.Num() > 0)
+        FString AssignedChain;
+
+        // Use TargetChain if provided, otherwise auto-select
+        if (!TargetChain.IsEmpty())
         {
-            // FIX: Convert to sorted array to ensure consistent chain assignment
+            AssignedChain = TargetChain;
+            // Ensure the target chain is registered
+            ChainIDs.Add(AssignedChain);
+            UE_LOG(LogTemp, Warning, TEXT("ParseSDF: Using specified target chain '%s'"), *AssignedChain);
+        }
+        else if (ChainIDs.Num() > 0)
+        {
+            // Auto-assign to first available chain
             TArray<FString> SortedChains = ChainIDs.Array();
             SortedChains.Sort();
             AssignedChain = SortedChains[0];  // Use first chain alphabetically (usually "A")
-            UE_LOG(LogTemp, Warning, TEXT("ParseSDF: Assigning to chain '%s' (from %d available chains)"),
+            UE_LOG(LogTemp, Warning, TEXT("ParseSDF: Auto-assigning to chain '%s' (from %d available chains)"),
                    *AssignedChain, ChainIDs.Num());
         }
         else
         {
-            // No chains exist, create a default one
+            // No chains exist, create a default "SDF" chain
+            AssignedChain = TEXT("SDF");
             ChainIDs.Add(AssignedChain);
             UE_LOG(LogTemp, Warning, TEXT("ParseSDF: No chains exist, created default chain '%s'"), *AssignedChain);
         }
@@ -1166,7 +1175,7 @@ void APDBViewer::ParseSDF(const FString &Content)
 
         auto *Info = new FLigandInfo();
         Info->LigandName = MoleculeName;
-        Info->bIsVisible = true; // Make SDF ligands visible by default
+        Info->bIsVisible = false; // Make SDF ligands HIDDEN by default - user toggles visibility as needed
         Info->bIsWater = false;  // FIX: SDF ligands are NOT water molecules
         Info->bFromSDF = true;   // Mark as SDF-sourced so it survives PDB reloads
         Info->AtomPositions = AtomPositions;

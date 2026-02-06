@@ -232,13 +232,19 @@ void UPDBStructureWidget::OnLoadSDFClicked()
         FString FileContent;
         if (FFileHelper::LoadFileToString(FileContent, *FilePath))
         {
-            PDBViewerRef->ParseSDF(FileContent);
-
-            // Explicitly refresh the tree after SDF load
-            if (StructureTreeView)
+            // Show chain selection dialog
+            FString SelectedChain;
+            if (PDBViewerRef->ShowChainSelectionDialog(SelectedChain))
             {
-                PDBViewerRef->ClearTreeNodeCache();
-                PDBViewerRef->PopulateTreeView(StructureTreeView);
+                // Parse SDF with selected chain
+                PDBViewerRef->ParseSDF(FileContent, SelectedChain);
+
+                // Explicitly refresh the tree after SDF load
+                if (StructureTreeView)
+                {
+                    PDBViewerRef->ClearTreeNodeCache();
+                    PDBViewerRef->PopulateTreeView(StructureTreeView);
+                }
             }
         }
     }
