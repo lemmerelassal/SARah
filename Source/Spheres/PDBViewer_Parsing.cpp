@@ -1210,6 +1210,28 @@ void APDBViewer::ParseSDF(const FString &Content, const FString& TargetChain)
         SetMeshArrayVisibility(Info->AtomMeshes, true); // Show SDF ligands
         SetMeshArrayVisibility(Info->BondMeshes, true);
 
+        // Initialize MD simulation state
+        Info->Velocities.SetNum(Info->AtomPositions.Num());
+        Info->Forces.SetNum(Info->AtomPositions.Num());
+        Info->Masses.SetNum(Info->AtomPositions.Num());
+        Info->Charges.SetNum(Info->AtomPositions.Num());
+        Info->AtomTypes.SetNum(Info->AtomPositions.Num());
+
+        // Initialize masses from elements
+        for (int32 i = 0; i < Info->AtomElements.Num(); ++i)
+        {
+            Info->Masses[i] = FMDForceCalculator::GetAtomMass(Info->AtomElements[i]);
+            Info->Charges[i] = 0.0f; // TODO: Proper charge assignment
+            Info->AtomTypes[i] = 0; // TODO: Atom type assignment
+        }
+
+        // Initialize velocities and forces to zero
+        for (int32 i = 0; i < Info->Velocities.Num(); ++i)
+        {
+            Info->Velocities[i] = FVector::ZeroVector;
+            Info->Forces[i] = FVector::ZeroVector;
+        }
+
         // Add to ligand map with proper chain-based key
         LigandMap.Add(Key, Info);
 
@@ -1293,6 +1315,28 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
                     Mesh->SetVisibility(LigInfo->bIsVisible);
             }
 
+            // Initialize MD simulation state
+            LigInfo->Velocities.SetNum(LigInfo->AtomPositions.Num());
+            LigInfo->Forces.SetNum(LigInfo->AtomPositions.Num());
+            LigInfo->Masses.SetNum(LigInfo->AtomPositions.Num());
+            LigInfo->Charges.SetNum(LigInfo->AtomPositions.Num());
+            LigInfo->AtomTypes.SetNum(LigInfo->AtomPositions.Num());
+
+            // Initialize masses from elements
+            for (int32 i = 0; i < LigInfo->AtomElements.Num(); ++i)
+            {
+                LigInfo->Masses[i] = FMDForceCalculator::GetAtomMass(LigInfo->AtomElements[i]);
+                LigInfo->Charges[i] = 0.0f; // TODO: Proper charge assignment
+                LigInfo->AtomTypes[i] = 0; // TODO: Atom type assignment
+            }
+
+            // Initialize velocities and forces to zero
+            for (int32 i = 0; i < LigInfo->Velocities.Num(); ++i)
+            {
+                LigInfo->Velocities[i] = FVector::ZeroVector;
+                LigInfo->Forces[i] = FVector::ZeroVector;
+            }
+
             LigandMap.Add(P.Key, LigInfo);
             // Don't fetch individual ligand CIFs anymore - we'll get bonds from the main CIF
         }
@@ -1317,6 +1361,28 @@ void APDBViewer::CreateResiduesFromAtomData(const TMap<FString, TMap<FString, FV
                 Info->AtomPositions.Add(A.Value);
                 Info->AtomElements.Add(Element);
                 Info->AtomNames.Add(AtomName);
+            }
+
+            // Initialize MD simulation state
+            Info->Velocities.SetNum(Info->AtomPositions.Num());
+            Info->Forces.SetNum(Info->AtomPositions.Num());
+            Info->Masses.SetNum(Info->AtomPositions.Num());
+            Info->Charges.SetNum(Info->AtomPositions.Num());
+            Info->AtomTypes.SetNum(Info->AtomPositions.Num());
+
+            // Initialize masses from elements
+            for (int32 i = 0; i < Info->AtomElements.Num(); ++i)
+            {
+                Info->Masses[i] = FMDForceCalculator::GetAtomMass(Info->AtomElements[i]);
+                Info->Charges[i] = 0.0f; // TODO: Proper charge assignment
+                Info->AtomTypes[i] = 0; // TODO: Atom type assignment
+            }
+
+            // Initialize velocities and forces to zero
+            for (int32 i = 0; i < Info->Velocities.Num(); ++i)
+            {
+                Info->Velocities[i] = FVector::ZeroVector;
+                Info->Forces[i] = FVector::ZeroVector;
             }
 
             // Don't draw bonds yet - wait for CIF bond data

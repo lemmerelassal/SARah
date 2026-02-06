@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "Http.h"
 #include "Components/PointLightComponent.h"
+#include "MDForceCalculator.h"
 #include "PDBViewer.generated.h"
 
 // Interaction type enumeration
@@ -124,6 +125,13 @@ struct FResidueInfo
     FVector CachedAromaticCenter;
     FVector CachedAromaticNormal;
     bool bAromaticCenterCached = false;
+
+    // MD simulation state (Phase 1)
+    TArray<FVector> Velocities;     // Velocity vectors (Angstroms/ps)
+    TArray<FVector> Forces;         // Force vectors (kcal/mol/Angstrom)
+    TArray<float> Masses;           // Atomic masses (amu)
+    TArray<float> Charges;          // Partial charges (e)
+    TArray<int32> AtomTypes;        // Force field atom type indices
 };
 
 USTRUCT()
@@ -154,6 +162,13 @@ struct FLigandInfo
     FVector CachedAromaticCenter;
     FVector CachedAromaticNormal;
     bool bAromaticCenterCached = false;
+
+    // MD simulation state (Phase 1)
+    TArray<FVector> Velocities;     // Velocity vectors (Angstroms/ps)
+    TArray<FVector> Forces;         // Force vectors (kcal/mol/Angstrom)
+    TArray<float> Masses;           // Atomic masses (amu)
+    TArray<float> Charges;          // Partial charges (e)
+    TArray<int32> AtomTypes;        // Force field atom type indices
 };
 
 // TreeView Node Object (must be UObject for TreeView)
@@ -701,6 +716,51 @@ protected:
     // Get color for interaction type
     FLinearColor GetInteractionColor(EInteractionType Type) const;
 
+    // ===== MOLECULAR DYNAMICS SIMULATION =====
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|MD Simulation")
+    bool bMDSimulationActive = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|MD Simulation")
+    float MDTimeStep = 0.5f; // femtoseconds (reduced for slower, more stable motion)
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|MD Simulation")
+    int32 MDStepsPerFrame = 2; // Number of MD steps to run per frame (reduced for slower motion)
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|MD Simulation")
+    float MDTemperature = 300.0f; // Kelvin
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|MD Simulation")
+    float MDDamping = 0.95f; // Velocity damping (0.9-0.99, lower = more damping, increased damping for slower motion)
+
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|MD Simulation")
+    void StartMDSimulation();
+
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|MD Simulation")
+    void StopMDSimulation();
+
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|MD Simulation")
+    void ResetMDSimulation();
+
+private:
+    // Perform one MD simulation step
+    void PerformMDStep(float DeltaTime);
+
+    // Integrate molecule using Velocity Verlet
+    template<typename TMolInfo>
+    void IntegrateMolecule(TMolInfo* Info, float TimeStep);
+
+    // Check bond integrity and reset overstretched bonds
+    template<typename TMolInfo>
+    void CheckBondIntegrity(TMolInfo* Info);
+
+    // Initialize velocities from Maxwell-Boltzmann distribution at MDTemperature
+    void InitializeVelocitiesFromTemperature();
+
+    // Update mesh positions from atom positions
+    void UpdateMeshPositions();
+
+public:
     // ===== OPTIMIZATION #17: LOD SYSTEM HELPERS =====
 
     // Current LOD level (0 = highest detail, 3 = lowest)

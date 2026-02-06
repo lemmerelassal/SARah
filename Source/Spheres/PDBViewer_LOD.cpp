@@ -17,16 +17,23 @@ void APDBViewer::Tick(float DeltaTime)
 {
     Super::Tick(DeltaTime);
 
-    if (!bEnableLODSystem || ForcedLODLevel >= 0)
-        return;
-
-    TimeSinceLastLODCheck += DeltaTime;
-
-    // Only check LOD every LODCheckInterval seconds to avoid performance hit
-    if (TimeSinceLastLODCheck >= LODCheckInterval)
+    // LOD system update
+    if (bEnableLODSystem && ForcedLODLevel < 0)
     {
-        UpdateLODLevel();
-        TimeSinceLastLODCheck = 0.0f;
+        TimeSinceLastLODCheck += DeltaTime;
+
+        // Only check LOD every LODCheckInterval seconds to avoid performance hit
+        if (TimeSinceLastLODCheck >= LODCheckInterval)
+        {
+            UpdateLODLevel();
+            TimeSinceLastLODCheck = 0.0f;
+        }
+    }
+
+    // Molecular dynamics simulation step
+    if (bMDSimulationActive)
+    {
+        PerformMDStep(DeltaTime);
     }
 }
 
@@ -206,4 +213,342 @@ void APDBViewer::SetForcedLODLevel(int32 LODLevel)
     {
         UE_LOG(LogTemp, Log, TEXT("LOD level set to automatic"));
     }
+}
+
+// ===== MOLECULAR DYNAMICS SIMULATION =====
+
+void APDBViewer::PerformMDStep(float DeltaTime)
+{
+    const float TimeStep = MDTimeStep;
+    const int32 NumSteps = FMath::Max(1, MDStepsPerFrame);
+
+    // Run multiple MD steps per frame for faster simulation
+    for (int32 Step = 0; Step < NumSteps; ++Step)
+    {
+        // PHASE 1: Only simulate ligands (protein is frozen)
+        // For each visible ligand, integrate its atoms
+        for (auto& Pair : LigandMap)
+        {
+            if (Pair.Value && Pair.Value->bIsVisible && Pair.Value->Velocities.Num() > 0)
+            {
+                IntegrateMolecule(Pair.Value, TimeStep);
+
+                // Check for badly stretched bonds (diagnostic)
+                CheckBondIntegrity(Pair.Value);
+            }
+        }
+    }
+
+    // Update mesh positions once after all steps (only ligands will have moved)
+    UpdateMeshPositions();
+}
+
+template<typename TMolInfo>
+void APDBViewer::CheckBondIntegrity(TMolInfo* Info)
+{
+    // Check if any bonds are stretched beyond reasonable limits
+    const float MaxBondStretch = 3.0f; // 3x equilibrium length
+
+    for (int32 i = 0; i < Info->BondPairs.Num(); ++i)
+    {
+        int32 Atom1 = Info->BondPairs[i].Key;
+        int32 Atom2 = Info->BondPairs[i].Value;
+
+        if (!Info->AtomPositions.IsValidIndex(Atom1) || !Info->AtomPositions.IsValidIndex(Atom2))
+            continue;
+
+        int32 BondOrder = Info->BondOrders.IsValidIndex(i) ? Info->BondOrders[i] : 1;
+        float R0 = FMDForceCalculator::GetEquilibriumBondLength(BondOrder,
+                                                                 Info->AtomElements[Atom1],
+                                                                 Info->AtomElements[Atom2]);
+
+        float CurrentDist = FVector::Dist(Info->AtomPositions[Atom1], Info->AtomPositions[Atom2]);
+
+        if (CurrentDist > R0 * MaxBondStretch)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Bond %d stretched to %.2f Å (equilibrium: %.2f Å, %.1fx)"),
+                   i, CurrentDist, R0, CurrentDist / R0);
+
+            // Optional: Reset bond to equilibrium length
+            FVector Direction = (Info->AtomPositions[Atom2] - Info->AtomPositions[Atom1]).GetSafeNormal();
+            FVector MidPoint = (Info->AtomPositions[Atom1] + Info->AtomPositions[Atom2]) * 0.5f;
+            Info->AtomPositions[Atom1] = MidPoint - Direction * (R0 * 0.5f);
+            Info->AtomPositions[Atom2] = MidPoint + Direction * (R0 * 0.5f);
+
+            // Zero velocities to prevent further stretching
+            Info->Velocities[Atom1] = FVector::ZeroVector;
+            Info->Velocities[Atom2] = FVector::ZeroVector;
+        }
+    }
+}
+
+template<typename TMolInfo>
+void APDBViewer::IntegrateMolecule(TMolInfo* Info, float TimeStep)
+{
+    // Calculate bonded forces
+    FMDForceCalculator::CalculateBondedForces(
+        Info->AtomPositions,
+        Info->AtomElements,
+        Info->BondPairs,
+        Info->BondOrders,
+        Info->Forces
+    );
+
+    // TODO Phase 2: Calculate non-bonded forces with spatial partitioning
+    // For now, skip non-bonded forces to keep it simple
+
+    // Unit conversion: kcal/(mol*Å*amu) to Å/fs²
+    // 1 kcal/(mol*Å*amu) = 418.4 Å/ps² = 0.0004184 Å/fs²
+    const float UnitConversion = 0.0004184f;
+
+    // Maximum force magnitude to prevent explosions (in kcal/mol/Å)
+    // Higher cap allows stretched bonds to restore properly while preventing VdW explosions
+    const float MaxForce = 500.0f;
+
+    // For bonded forces only, we can allow even higher forces for badly stretched bonds
+    const float MaxBondedForce = 2000.0f;
+
+    // Velocity Verlet integration - only for visible atoms
+    for (int32 i = 0; i < Info->AtomPositions.Num(); ++i)
+    {
+        // Skip atoms that don't have valid masses
+        if (!Info->Masses.IsValidIndex(i) || Info->Masses[i] <= 0.0f)
+            continue;
+
+        // Skip atoms whose meshes are hidden (e.g., hydrogens when bShowHydrogens is off)
+        if (Info->AtomMeshes.IsValidIndex(i) && IsValid(Info->AtomMeshes[i]))
+        {
+            if (!Info->AtomMeshes[i]->IsVisible())
+                continue;
+        }
+        else
+        {
+            // If no mesh exists, skip this atom
+            continue;
+        }
+
+        FVector& Pos = Info->AtomPositions[i];
+        FVector& Vel = Info->Velocities[i];
+        FVector& Force = Info->Forces[i];
+        float Mass = Info->Masses[i];
+
+        // Cap force magnitude to prevent explosions
+        // Use higher cap for bonded-only forces (Phase 1), lower when non-bonded forces added (Phase 2)
+        float ForceMag = Force.Size();
+        if (ForceMag > MaxBondedForce)
+        {
+            Force = Force.GetSafeNormal() * MaxBondedForce;
+        }
+
+        // Convert force to acceleration (Å/fs²)
+        FVector Acceleration = (Force / Mass) * UnitConversion;
+
+        // Velocity Verlet integration
+        // v(t + dt/2) = v(t) + a(t) * dt/2
+        Vel += Acceleration * (TimeStep * 0.5f);
+
+        // x(t + dt) = x(t) + v(t + dt/2) * dt
+        Pos += Vel * TimeStep;
+
+        // v(t + dt) = v(t + dt/2) + a(t) * dt/2 (simplified - should recalculate forces)
+        Vel += Acceleration * (TimeStep * 0.5f);
+
+        // Apply velocity damping to dissipate energy (once per timestep)
+        Vel *= MDDamping;
+    }
+}
+
+// Explicit template instantiations
+template void APDBViewer::IntegrateMolecule<FResidueInfo>(FResidueInfo*, float);
+template void APDBViewer::IntegrateMolecule<FLigandInfo>(FLigandInfo*, float);
+template void APDBViewer::CheckBondIntegrity<FResidueInfo>(FResidueInfo*);
+template void APDBViewer::CheckBondIntegrity<FLigandInfo>(FLigandInfo*);
+
+void APDBViewer::UpdateMeshPositions()
+{
+    // Update residue atom meshes
+    for (auto& Pair : ResidueMap)
+    {
+        if (!Pair.Value)
+            continue;
+
+        for (int32 i = 0; i < Pair.Value->AtomPositions.Num(); ++i)
+        {
+            if (Pair.Value->AtomMeshes.IsValidIndex(i) && IsValid(Pair.Value->AtomMeshes[i]))
+            {
+                FVector ScaledPos = Pair.Value->AtomPositions[i] * PDB::SCALE;
+                Pair.Value->AtomMeshes[i]->SetWorldLocation(ScaledPos);
+            }
+        }
+
+        // Update bond meshes
+        for (int32 i = 0; i < Pair.Value->BondPairs.Num(); ++i)
+        {
+            if (!Pair.Value->BondMeshes.IsValidIndex(i) || !IsValid(Pair.Value->BondMeshes[i]))
+                continue;
+
+            const TPair<int32, int32>& Bond = Pair.Value->BondPairs[i];
+            if (!Pair.Value->AtomPositions.IsValidIndex(Bond.Key) || !Pair.Value->AtomPositions.IsValidIndex(Bond.Value))
+                continue;
+
+            FVector Pos1 = Pair.Value->AtomPositions[Bond.Key] * PDB::SCALE;
+            FVector Pos2 = Pair.Value->AtomPositions[Bond.Value] * PDB::SCALE;
+            FVector MidPoint = (Pos1 + Pos2) * 0.5f;
+            FVector Direction = Pos2 - Pos1;
+            float Distance = Direction.Size();
+
+            if (Distance > 0.01f)
+            {
+                FRotator Rotation = Direction.Rotation();
+                Pair.Value->BondMeshes[i]->SetWorldLocation(MidPoint);
+                Pair.Value->BondMeshes[i]->SetWorldRotation(Rotation);
+                Pair.Value->BondMeshes[i]->SetWorldScale3D(FVector(PDB::CYLINDER_SIZE, PDB::CYLINDER_SIZE, Distance / 100.0f));
+            }
+        }
+    }
+
+    // Update ligand atom meshes
+    for (auto& Pair : LigandMap)
+    {
+        if (!Pair.Value)
+            continue;
+
+        for (int32 i = 0; i < Pair.Value->AtomPositions.Num(); ++i)
+        {
+            if (Pair.Value->AtomMeshes.IsValidIndex(i) && IsValid(Pair.Value->AtomMeshes[i]))
+            {
+                FVector ScaledPos = Pair.Value->AtomPositions[i] * PDB::SCALE;
+                Pair.Value->AtomMeshes[i]->SetWorldLocation(ScaledPos);
+            }
+        }
+
+        // Update bond meshes
+        for (int32 i = 0; i < Pair.Value->BondPairs.Num(); ++i)
+        {
+            if (!Pair.Value->BondMeshes.IsValidIndex(i) || !IsValid(Pair.Value->BondMeshes[i]))
+                continue;
+
+            const TPair<int32, int32>& Bond = Pair.Value->BondPairs[i];
+            if (!Pair.Value->AtomPositions.IsValidIndex(Bond.Key) || !Pair.Value->AtomPositions.IsValidIndex(Bond.Value))
+                continue;
+
+            FVector Pos1 = Pair.Value->AtomPositions[Bond.Key] * PDB::SCALE;
+            FVector Pos2 = Pair.Value->AtomPositions[Bond.Value] * PDB::SCALE;
+            FVector MidPoint = (Pos1 + Pos2) * 0.5f;
+            FVector Direction = Pos2 - Pos1;
+            float Distance = Direction.Size();
+
+            if (Distance > 0.01f)
+            {
+                FRotator Rotation = Direction.Rotation();
+                Pair.Value->BondMeshes[i]->SetWorldLocation(MidPoint);
+                Pair.Value->BondMeshes[i]->SetWorldRotation(Rotation);
+                Pair.Value->BondMeshes[i]->SetWorldScale3D(FVector(PDB::CYLINDER_SIZE, PDB::CYLINDER_SIZE, Distance / 100.0f));
+            }
+        }
+    }
+}
+
+void APDBViewer::StartMDSimulation()
+{
+    // Initialize velocities from Maxwell-Boltzmann distribution
+    InitializeVelocitiesFromTemperature();
+
+    bMDSimulationActive = true;
+    UE_LOG(LogTemp, Log, TEXT("MD Simulation Started (TimeStep: %f fs, Temperature: %f K)"), MDTimeStep, MDTemperature);
+}
+
+void APDBViewer::InitializeVelocitiesFromTemperature()
+{
+    // Boltzmann constant in kcal/(mol*K)
+    const float kB = 0.001987f;
+
+    // Lambda to generate Gaussian random number using Box-Muller transform
+    auto RandGaussian = []() -> float {
+        float U1 = FMath::FRand();
+        float U2 = FMath::FRand();
+        // Avoid log(0)
+        if (U1 < 1e-8f) U1 = 1e-8f;
+        return FMath::Sqrt(-2.0f * FMath::Loge(U1)) * FMath::Cos(2.0f * PI * U2);
+    };
+
+    // Lambda to initialize velocities for a molecule
+    auto InitMolecule = [&](auto* Info) {
+        if (!Info || Info->Velocities.Num() == 0)
+            return;
+
+        for (int32 i = 0; i < Info->Velocities.Num(); ++i)
+        {
+            if (!Info->Masses.IsValidIndex(i) || Info->Masses[i] <= 0.0f)
+                continue;
+
+            // Maxwell-Boltzmann distribution: <v²> = kB*T/m
+            // Standard deviation of velocity component: σ = sqrt(kB*T/m)
+            // Units: sqrt(kcal/(mol*amu)) = sqrt(0.001987 * 300 / 12) Å/fs
+            float Mass = Info->Masses[i];
+            float Sigma = FMath::Sqrt(kB * MDTemperature / Mass);
+
+            // Generate random velocity components from Gaussian distribution
+            // Scale by 0.01 to convert from Å/fs to appropriate units for visible motion
+            Info->Velocities[i] = FVector(
+                RandGaussian() * Sigma * 0.01f,
+                RandGaussian() * Sigma * 0.01f,
+                RandGaussian() * Sigma * 0.01f
+            );
+        }
+    };
+
+    // Initialize velocities for all visible ligands
+    for (auto& Pair : LigandMap)
+    {
+        if (Pair.Value && Pair.Value->bIsVisible)
+        {
+            InitMolecule(Pair.Value);
+        }
+    }
+
+    // Initialize velocities for all visible residues
+    for (auto& Pair : ResidueMap)
+    {
+        if (Pair.Value && Pair.Value->bIsVisible)
+        {
+            InitMolecule(Pair.Value);
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("Initialized velocities from temperature: %.1f K"), MDTemperature);
+}
+
+void APDBViewer::StopMDSimulation()
+{
+    bMDSimulationActive = false;
+    UE_LOG(LogTemp, Log, TEXT("MD Simulation Stopped"));
+}
+
+void APDBViewer::ResetMDSimulation()
+{
+    // Reset all velocities and forces to zero
+    for (auto& Pair : ResidueMap)
+    {
+        if (Pair.Value)
+        {
+            for (FVector& Vel : Pair.Value->Velocities)
+                Vel = FVector::ZeroVector;
+            for (FVector& Force : Pair.Value->Forces)
+                Force = FVector::ZeroVector;
+        }
+    }
+
+    for (auto& Pair : LigandMap)
+    {
+        if (Pair.Value)
+        {
+            for (FVector& Vel : Pair.Value->Velocities)
+                Vel = FVector::ZeroVector;
+            for (FVector& Force : Pair.Value->Forces)
+                Force = FVector::ZeroVector;
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("MD Simulation Reset (all velocities and forces set to zero)"));
 }
