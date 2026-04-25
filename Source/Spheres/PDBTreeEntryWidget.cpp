@@ -41,40 +41,21 @@ void UPDBTreeEntryWidget::NativeOnListItemObjectSet(UObject* ListItemObject)
         }
     }
     
-    // Set display name with proper color based on node type
+    // Set display name
     if (DisplayNameText)
     {
         // Add icon prefix for category nodes
         FString DisplayText = GetNodeIcon() + CurrentNode->DisplayName;
         DisplayNameText->SetText(FText::FromString(DisplayText));
-        
-        // Set color based on node type
-        FLinearColor TextColor = GetNodeTextColor();
-        DisplayNameText->SetColorAndOpacity(FSlateColor(TextColor));
     }
     
     // Set visibility checkbox
     if (VisibilityCheckbox)
     {
-        // FIX: Get the actual visibility state from the underlying data
+        // Get the actual visibility state from the underlying data
         bool bActualVisibility = GetActualVisibilityForNode(CurrentNode);
         VisibilityCheckbox->SetIsChecked(bActualVisibility);
-        
-        // Style the checkbox for better visibility
-        FCheckBoxStyle CheckboxStyle = VisibilityCheckbox->GetWidgetStyle();
-        
-        // Checked state - bright pink
-        CheckboxStyle.CheckedImage.TintColor = FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("EC4899"))));
-        CheckboxStyle.CheckedHoveredImage.TintColor = FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("DB2777"))));
-        CheckboxStyle.CheckedPressedImage.TintColor = FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("BE185D"))));
-        
-        // Unchecked state - gray border
-        CheckboxStyle.UncheckedImage.TintColor = FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("9CA3AF"))));
-        CheckboxStyle.UncheckedHoveredImage.TintColor = FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("6B7280"))));
-        CheckboxStyle.UncheckedPressedImage.TintColor = FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("4B5563"))));
-        
-        VisibilityCheckbox->SetWidgetStyle(CheckboxStyle);
-        
+
         // Bind checkbox event
         if (!VisibilityCheckbox->OnCheckStateChanged.IsBound())
         {
@@ -91,19 +72,17 @@ void UPDBTreeEntryWidget::NativeOnListItemObjectSet(UObject* ListItemObject)
         
         // Note: We can't sync with TreeView's expansion state in UE 5.6
         // The widget will track its own state with bIsExpanded
-        
-        // Set expander button text color
+
+        // Set initial arrow based on expansion state (always starts collapsed)
         UPanelWidget* ButtonContent = Cast<UPanelWidget>(ExpanderButton->GetChildAt(0));
         if (ButtonContent && ButtonContent->GetChildrenCount() > 0)
         {
             if (UTextBlock* ButtonText = Cast<UTextBlock>(ButtonContent->GetChildAt(0)))
             {
-                ButtonText->SetColorAndOpacity(FSlateColor(FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("6B7280")))));
-                // Set initial arrow based on expansion state (always starts collapsed)
                 ButtonText->SetText(FText::FromString(bIsExpanded ? TEXT("▼") : TEXT("▶")));
             }
         }
-        
+
         // Bind expander button event
         if (!ExpanderButton->OnClicked.IsBound())
         {
@@ -215,50 +194,6 @@ bool UPDBTreeEntryWidget::GetActualVisibilityForNode(UPDBTreeNode* Node) const
         
         default:
             return Node->bIsVisible;
-    }
-}
-
-FLinearColor UPDBTreeEntryWidget::GetNodeTextColor() const
-{
-    if (!CurrentNode)
-        return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("1F2937")));
-    
-    switch (CurrentNode->NodeType)
-    {
-        case EPDBNodeType::Chain:
-            // Dark blue for chains
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("1E3A8A")));
-            
-        case EPDBNodeType::ResiduesCategory:
-            // Purple for residues category
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("7C3AED")));
-            
-        case EPDBNodeType::HeteroatomsCategory:
-            // Orange for heteroatoms category
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("EA580C")));
-            
-        case EPDBNodeType::WaterCategory:
-            // Blue for water category
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("0284C7")));
-            
-        case EPDBNodeType::LigandsCategory:
-            // Green for ligands category
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("059669")));
-            
-        case EPDBNodeType::Residue:
-            // Medium gray for individual residues
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("4B5563")));
-            
-        case EPDBNodeType::Water:
-            // Light blue for water molecules
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("38BDF8")));
-            
-        case EPDBNodeType::Ligand:
-            // Teal for ligand molecules
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("14B8A6")));
-            
-        default:
-            return FLinearColor::FromSRGBColor(FColor::FromHex(TEXT("1F2937")));
     }
 }
 

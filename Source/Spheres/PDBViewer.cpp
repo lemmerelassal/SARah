@@ -445,6 +445,8 @@ void APDBViewer::ClearCurrentStructure()
     // Clear general atom/bond mesh arrays (meshes already destroyed by ClearResidueMap/ClearLigandMap)
     AllAtomMeshes.Empty();
     AllBondMeshes.Empty();
+
+    OnStructureCleared.Broadcast();
 }
 
 int32 APDBViewer::GetAtomCharge(const FString& Element, const FString& AtomName, const FString& ResidueName) const

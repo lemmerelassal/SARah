@@ -289,6 +289,8 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "PDB Viewer") FOnLigandsLoaded OnLigandsLoaded;
     DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnInteractionsCalculated);
     UPROPERTY(BlueprintAssignable, Category = "PDB Viewer") FOnInteractionsCalculated OnInteractionsCalculated;
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnStructureCleared);
+    UPROPERTY(BlueprintAssignable, Category = "PDB Viewer") FOnStructureCleared OnStructureCleared;
     
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void SaveStructureToFile(const FString& FilePath);
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer") void LoadStructureFromFile(const FString& FilePath);
