@@ -8,6 +8,7 @@
 class UButton;
 class UCheckBox;
 class UWidget;
+class UTextBlock;
 class APDBViewer;
 
 UCLASS()
@@ -19,12 +20,17 @@ public:
     virtual void NativeConstruct() override;
     virtual void NativeDestruct() override;
 
+    // ── Bar buttons (required) ───────────────────────────────────────────────
     UPROPERTY(meta = (BindWidget))
     UButton* FileMenuButton;
 
     UPROPERTY(meta = (BindWidget))
+    UButton* ViewMenuButton;
+
+    UPROPERTY(meta = (BindWidget))
     UButton* CalculateButton;
 
+    // ── File dropdown ────────────────────────────────────────────────────────
     UPROPERTY(meta = (BindWidgetOptional))
     UWidget* FileDropdownPanel;
 
@@ -40,43 +46,66 @@ public:
     UPROPERTY(meta = (BindWidgetOptional))
     UButton* MenuItem_LoadSDF;
 
+    // ── View dropdown ────────────────────────────────────────────────────────
+    UPROPERTY(meta = (BindWidgetOptional))
+    UWidget* ViewDropdownPanel;
+
+    UPROPERTY(meta = (BindWidgetOptional))
+    UButton* MenuItem_ToggleTree;
+
+    UPROPERTY(meta = (BindWidgetOptional))
+    UButton* MenuItem_ToggleInteractions;
+
+    // ── Calculate options ────────────────────────────────────────────────────
     UPROPERTY(meta = (BindWidgetOptional))
     UCheckBox* ProteinProteinCheckBox;
 
     UPROPERTY(meta = (BindWidgetOptional))
     UCheckBox* ProteinLigandCheckBox;
 
+    // Optional text block inside CalculateButton to show "Calculating…"
+    UPROPERTY(meta = (BindWidgetOptional))
+    UTextBlock* CalculateButtonText;
+
+    // ── Backdrop (full-screen invisible button behind open dropdowns) ────────
+    UPROPERTY(meta = (BindWidgetOptional))
+    UButton* DropdownBackdrop;
+
+    // Populated automatically on first toggle — no Blueprint wiring needed
+    UPROPERTY()
+    UUserWidget* TreePanel;
+
+    UPROPERTY()
+    UUserWidget* InteractionsPanel;
+
 protected:
     UPROPERTY()
     APDBViewer* PDBViewerRef;
 
-    bool bFileDropdownOpen = false;
-    bool bStructureReady = false;
-    bool bIsCalculating = false;
+    bool bFileDropdownOpen       = false;
+    bool bViewDropdownOpen       = false;
+    bool bStructureReady         = false;
+    bool bIsCalculating          = false;
+    bool bTreeVisible            = true;
+    bool bInteractionsVisible    = true;
 
-    UFUNCTION()
-    void OnFileMenuClicked();
+    UFUNCTION() void OnFileMenuClicked();
+    UFUNCTION() void OnViewMenuClicked();
+    UFUNCTION() void OnDropdownBackdropClicked();
 
-    UFUNCTION()
-    void OnLoadClicked();
+    UFUNCTION() void OnLoadClicked();
+    UFUNCTION() void OnSaveClicked();
+    UFUNCTION() void OnClearClicked();
+    UFUNCTION() void OnLoadSDFClicked();
 
-    UFUNCTION()
-    void OnSaveClicked();
+    UFUNCTION() void OnToggleTreeClicked();
+    UFUNCTION() void OnToggleInteractionsClicked();
 
-    UFUNCTION()
-    void OnClearClicked();
+    UFUNCTION() void OnCalculateClicked();
+    UFUNCTION() void OnStructureLoaded();
+    UFUNCTION() void OnInteractionsCalculated();
 
-    UFUNCTION()
-    void OnLoadSDFClicked();
-
-    UFUNCTION()
-    void OnCalculateClicked();
-
-    UFUNCTION()
-    void OnStructureLoaded();
-
-    UFUNCTION()
-    void OnInteractionsCalculated();
-
-    void CloseFileDropdown();
+    void CloseAllDropdowns();
+    void SetCalculateLabel(const FString& Label);
+    void FindPanels();
 };
