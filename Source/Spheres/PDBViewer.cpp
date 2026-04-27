@@ -389,6 +389,12 @@ APDBViewer::APDBViewer()
     SphereMeshAsset = Sphere.Object;
     CylinderMeshAsset = Cylinder.Object;
     SphereMaterialAsset = Mat.Object;
+
+    SurfaceMeshComp = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("SurfaceMesh"));
+    SurfaceMeshComp->SetupAttachment(RootComponent);
+    SurfaceMeshComp->SetVisibility(false);
+    SurfaceMeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    SurfaceMeshComp->bUseAsyncCooking = false;
 }
 
 void APDBViewer::BeginPlay()
@@ -437,6 +443,9 @@ void APDBViewer::ClearCurrentStructure()
     // OPTIMIZATION #17: Reset LOD system cache
     bStructureCenterCached = false;
     CurrentLODLevel = 0;
+
+    // Clear surface mesh
+    ClearSurface();
 
     // Clear interaction data and meshes
     DestroyMeshComponents(InteractionMeshes);

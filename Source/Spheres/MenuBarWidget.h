@@ -56,6 +56,9 @@ public:
     UPROPERTY(meta = (BindWidgetOptional))
     UButton* MenuItem_ToggleInteractions;
 
+    UPROPERTY(meta = (BindWidgetOptional))
+    UButton* MenuItem_ToggleSurface;
+
     // ── Calculate options ────────────────────────────────────────────────────
     UPROPERTY(meta = (BindWidgetOptional))
     UCheckBox* ProteinProteinCheckBox;
@@ -88,6 +91,7 @@ protected:
     bool bIsCalculating          = false;
     bool bTreeVisible            = true;
     bool bInteractionsVisible    = true;
+    bool bSurfaceVisible         = false;
 
     UFUNCTION() void OnFileMenuClicked();
     UFUNCTION() void OnViewMenuClicked();
@@ -100,6 +104,7 @@ protected:
 
     UFUNCTION() void OnToggleTreeClicked();
     UFUNCTION() void OnToggleInteractionsClicked();
+    UFUNCTION() void OnToggleSurfaceClicked();
 
     UFUNCTION() void OnCalculateClicked();
     UFUNCTION() void OnStructureLoaded();

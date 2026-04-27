@@ -32,7 +32,8 @@ public class Spheres : ModuleRules
 			"RHI",              // Required for GPU
 		    "RHICore",          // Required for GPU
     		"RenderCore",       // Required for GPU
-    		"Renderer"          // Required for GPU
+    		"Renderer",         // Required for GPU
+			"ProceduralMeshComponent"
 		});
 
 		// Private dependencies for your custom modules (like Eigen)

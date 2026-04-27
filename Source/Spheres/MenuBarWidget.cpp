@@ -80,6 +80,12 @@ void UMenuBarWidget::NativeConstruct()
         MenuItem_ToggleInteractions->OnClicked.AddDynamic(this, &UMenuBarWidget::OnToggleInteractionsClicked);
         MenuItem_ToggleInteractions->SetToolTipText(FText::FromString(TEXT("Show or hide the interactions panel")));
     }
+    if (MenuItem_ToggleSurface)
+    {
+        MenuItem_ToggleSurface->OnClicked.AddDynamic(this, &UMenuBarWidget::OnToggleSurfaceClicked);
+        MenuItem_ToggleSurface->SetToolTipText(FText::FromString(TEXT("Generate or toggle the molecular surface")));
+        MenuItem_ToggleSurface->SetIsEnabled(false);
+    }
 
     // ── Backdrop (dismisses open dropdowns on outside click) ─────────────────
     if (DropdownBackdrop)
@@ -231,6 +237,27 @@ void UMenuBarWidget::OnToggleInteractionsClicked()
         InteractionsPanel->SetVisibility(bInteractionsVisible ? ESlateVisibility::Visible : ESlateVisibility::Collapsed);
 }
 
+void UMenuBarWidget::OnToggleSurfaceClicked()
+{
+    CloseAllDropdowns();
+    if (!PDBViewerRef || !bStructureReady) return;
+
+    if (!bSurfaceVisible)
+    {
+        // Generate on first show (or after clear); subsequent toggles just show/hide
+        if (!PDBViewerRef->bSurfaceGenerated)
+            PDBViewerRef->GenerateMolecularSurface(PDBViewerRef->SurfaceProbeRadius, PDBViewerRef->SurfaceGridResolution);
+        else
+            PDBViewerRef->ToggleSurface(true);
+        bSurfaceVisible = true;
+    }
+    else
+    {
+        PDBViewerRef->ToggleSurface(false);
+        bSurfaceVisible = false;
+    }
+}
+
 // ── Calculate ────────────────────────────────────────────────────────────────
 
 void UMenuBarWidget::OnCalculateClicked()
@@ -254,6 +281,8 @@ void UMenuBarWidget::OnStructureLoaded()
         CalculateButton->SetIsEnabled(true);
         CalculateButton->SetToolTipText(FText::FromString(TEXT("Calculate molecular interactions")));
     }
+    if (MenuItem_ToggleSurface)
+        MenuItem_ToggleSurface->SetIsEnabled(true);
     SetCalculateLabel(TEXT("Calculate"));
 }
 

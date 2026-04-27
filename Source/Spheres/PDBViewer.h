@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "Http.h"
 #include "Components/PointLightComponent.h"
+#include "ProceduralMeshComponent.h"
 #include "MDForceCalculator.h"
 #include "PDBViewer.generated.h"
 
@@ -420,6 +421,31 @@ public:
     UFUNCTION(BlueprintCallable, Category = "PDB Viewer|Interactions")
     void ClearAllInteractions();
     
+    // ===== SURFACE RENDERING =====
+
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|Surface")
+    void GenerateMolecularSurface(float ProbeRadius = 1.4f, float GridResolution = 1.0f);
+
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|Surface")
+    void ToggleSurface(bool bVisible);
+
+    UFUNCTION(BlueprintCallable, Category = "PDB Viewer|Surface")
+    void ClearSurface();
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Surface")
+    UMaterialInterface* SurfaceMaterial = nullptr;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Surface")
+    FLinearColor SurfaceColor = FLinearColor(0.35f, 0.62f, 0.88f, 1.0f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Surface")
+    float SurfaceProbeRadius = 1.4f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Surface")
+    float SurfaceGridResolution = 1.0f;
+
+    bool bSurfaceGenerated = false;
+
     // Configure interaction detection parameters
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PDB Viewer|Interactions")
     float HBondMaxDistance = 3.5f; // Angstroms
@@ -516,12 +542,13 @@ protected:
     UPROPERTY() TArray<UStaticMeshComponent*> OverlapMarkers;
 
     virtual void BeginPlay() override;
-    
+
     UPROPERTY() UStaticMesh* SphereMeshAsset;
     UPROPERTY() UStaticMesh* CylinderMeshAsset;
     UPROPERTY() UMaterial* SphereMaterialAsset;
     UPROPERTY() TArray<UStaticMeshComponent*> AllAtomMeshes;
     UPROPERTY() TArray<UStaticMeshComponent*> AllBondMeshes;
+    UPROPERTY() UProceduralMeshComponent* SurfaceMeshComp;
     
     FString CurrentPDBContent, CurrentStructureID;
 
